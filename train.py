@@ -1,3 +1,4 @@
+import os
 import torch
 import transformers
 from dataclasses import dataclass, field
@@ -24,12 +25,21 @@ class DataArguments:
 
 @dataclass
 class TrainingArguments(transformers.TrainingArguments):
-    report_to: str = field(default="none", metadata={"help": "Where to report metrics."})
+    report_to: str = field(default="wandb", metadata={"help": "Where to report metrics."})
+    logging_steps: int = field(default=10, metadata={"help": "Log every n steps."})
+    logging_strategy: str = field(default="steps", metadata={"help": "Log every n steps or every n epochs."})
+    remove_unused_columns: bool = field(default=False)
+    wandb_project: str = field(default="toy-alignment")
+    wandb_entity: str = field(default="none")
 
 
 def train():
     parser = transformers.HfArgumentParser((ModelArguments, DataArguments, TrainingArguments))
     model_args, data_args, training_args = parser.parse_args_into_dataclasses()
+
+    # wandb setup
+    os.environ['WANDB_ENTITY'] = training_args.wandb_entity
+    os.environ['WANDB_PROJECT'] = training_args.wandb_project
 
     # set up model
     config = transformers.CONFIG_MAPPING[model_args.model_type](
@@ -58,6 +68,9 @@ def train():
         eval_dataset=eval_dataset,
     )
     trainer.train()
+
+    # eval
+    trainer.evaluate()
 
 
 if __name__ == "__main__":
