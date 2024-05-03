@@ -15,13 +15,13 @@ class ModelArguments:
 
 @dataclass
 class DataArguments:
-    num_hmms: int = field(default=1, metadata={"help": "Number of HMMs in the mixture."})
+    num_hmms: int = field(default=5, metadata={"help": "Number of HMMs in the mixture."})
     num_hidden_states: int = field(default=5, metadata={"help": "Number of hidden states in each HMM."})
-    num_emissions: int = field(default=2, metadata={"help": "Number of emissions in each HMM."})
+    num_emissions: int = field(default=5, metadata={"help": "Number of emissions in each HMM."})
     uniform_weights: Optional[bool] = field(default=True, metadata={"help": "Whether to use uniform weights for the mixture."})
-    num_train_examples: int = field(default=1000, metadata={"help": "Number of training examples."})
-    num_eval_examples: int = field(default=100, metadata={"help": "Number of evaluation examples."})
-    xie: Optional[bool] = field(default=False, metadata={"help": "Whether to use Xie's HMM."})
+    num_train_examples: int = field(default=100, metadata={"help": "Number of training examples."})
+    num_eval_examples: int = field(default=10, metadata={"help": "Number of evaluation examples."})
+    xie: Optional[bool] = field(default=True, metadata={"help": "Whether to use Xie's HMM."})
 
 
 @dataclass
@@ -49,21 +49,20 @@ def train():
     config = transformers.CONFIG_MAPPING[model_args.model_type](
         vocab_size=data_args.num_emissions if not data_args.xie else data_args.num_hidden_states * data_args.num_emissions,
         num_hidden_layers=model_args.num_hidden_layers,
-        num_attention_heads=4, # 12
-        num_key_value_heads=4, # 12
-        hidden_size=64, # 768
+        num_attention_heads=12,
+        num_key_value_heads=12,
+        hidden_size=768,
     )
     model = transformers.AutoModelForCausalLM.from_config(config)
-    transformers.LlamaForCausalLM
     n_params = sum({p.data_ptr(): p.numel() for p in model.parameters()}.values())
-    print(f"Training new model from scratch - Total size={n_params/2**20:.2f}M params")
+    print(f"Training new model from scratch - Total size={n_params/(10**6):.2f}M params")
 
     # set up data
     hmms = MixtureOfHmms(num_hmms=data_args.num_hmms, num_hidden_states=data_args.num_hidden_states,
                          num_emissions=data_args.num_emissions, uniform_weights=data_args.uniform_weights,
                          xie=data_args.xie)
-    train_dataset = HMMDataset(hmms=hmms, num_train_examples=data_args.num_train_examples)
-    eval_dataset = HMMDataset(hmms=hmms, num_train_examples=data_args.num_eval_examples)
+    train_dataset = HMMDataset(hmms=hmms, num_train_examples=data_args.num_train_examples, sample_length=10240)
+    eval_dataset = HMMDataset(hmms=hmms, num_train_examples=data_args.num_eval_examples, sample_length=1024)
 
     # set up trainer
     trainer = transformers.Trainer(
@@ -75,7 +74,8 @@ def train():
     trainer.train()
 
     # eval
-    trainer.evaluate()
+    res = trainer.evaluate()
+    print(res)
 
 
 if __name__ == "__main__":

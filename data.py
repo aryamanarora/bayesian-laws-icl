@@ -53,7 +53,10 @@ class XieHMM:
         for _ in range(length):
             entities.append(entity)
             properties.append(property)
-            emissions.append(entity * self.num_properties + property)
+            if property == 0: # delimiter state
+                emissions.append(0)
+            else:
+                emissions.append(entity * self.num_properties + property)
             entity = np.random.choice(self.num_entities, p=self.entity_transition_probs[entity])
             property = np.random.choice(self.num_properties, p=self.property_transition_probs[property])
         return emissions, list(zip(entities, properties))
@@ -114,8 +117,9 @@ class MixtureOfHmms:
         else:
             self.weights = np.random.dirichlet(np.ones(num_hmms), size=1)[0]
     
-    def sample(self, length: int):
-        hmm = np.random.choice(self.num_hmms, p=self.weights)
+    def sample(self, length: int, hmm=None):
+        if hmm is None:
+            hmm = np.random.choice(self.num_hmms, p=self.weights)
         return self.hmms[hmm].sample(length), hmm
     
     def score(self, emissions: list[int]):
@@ -124,7 +128,7 @@ class MixtureOfHmms:
     
 
 class HMMDataset(Dataset):
-    def __init__(self, hmms: MixtureOfHmms, num_train_examples: int=10000):
+    def __init__(self, hmms: MixtureOfHmms, num_train_examples: int=10000, sample_length: int=1000):
         super(HMMDataset, self).__init__()
         self.hmms = hmms
         self.length = num_train_examples
@@ -134,7 +138,35 @@ class HMMDataset(Dataset):
 
         # generate data
         for _ in tqdm(range(self.length)):
-            (emissions, states), hmm = self.hmms.sample(1000)
+            (emissions, states), hmm = self.hmms.sample(sample_length)
+            self.emissions.append(emissions)
+            self.states.append(states)
+            self.hmm.append(hmm)
+    
+    def __len__(self):
+        return self.length
+    
+    def __getitem__(self, idx):
+        return {
+            "input_ids": self.emissions[idx],
+            "labels": self.emissions[idx],
+            "states": self.states[idx],
+            "hmm": self.hmm[idx],
+        }
+    
+
+class HMMDataset(Dataset):
+    def __init__(self, hmms: MixtureOfHmms, num_train_examples: int=10000, sample_length: int=1000):
+        super(HMMDataset, self).__init__()
+        self.hmms = hmms
+        self.length = num_train_examples
+        self.emissions = []
+        self.states = []
+        self.hmm = []
+
+        # generate data
+        for _ in tqdm(range(self.length)):
+            (emissions, states), hmm = self.hmms.sample(sample_length)
             self.emissions.append(emissions)
             self.states.append(states)
             self.hmm.append(hmm)
