@@ -1,6 +1,62 @@
 import numpy as np
 from tqdm import tqdm
 from torch.utils.data import Dataset
+from typing import Union
+
+
+class XieHMM:
+    num_entities: int
+    num_properties: int
+    entity_transition_probs: np.ndarray # shape: (num_entities, num_entities)
+    property_transition_probs: np.ndarray # shape: (num_properties, num_properties)
+    start_entity_probs: np.ndarray # shape: (num_entities,)
+    start_property_probs: np.ndarray # shape: (num_properties,)
+
+    def __init__(self, num_entities: int, num_properties: int):
+        self.num_entities = num_entities
+        self.num_properties = num_properties
+
+        # generate T
+        # first need 100 random permutation matrices of size (num_properties, num_properties)
+        weights = (np.random.random(100) - 0.5) / 0.1
+        weights = np.exp(weights) / np.sum(np.exp(weights))
+        T = np.zeros((num_properties, num_properties))
+        for i in range(100):
+            permutation_matrix = np.random.permutation(np.eye(num_properties))
+            T += weights[i] * permutation_matrix
+        self.property_transition_probs = T
+
+        # start
+        T_s = (np.random.random(num_properties) - 0.5) / 10
+        T_s = np.exp(T_s) / np.sum(np.exp(T_s))
+        self.start_property_probs = T_s
+
+        # generate S
+        # same process
+        weights = (np.random.random(100) - 0.5) / 0.1
+        weights = np.exp(weights) / np.sum(np.exp(weights))
+        S = np.zeros((num_entities, num_entities))
+        for i in range(100):
+            permutation_matrix = np.random.permutation(np.eye(num_entities))
+            S += weights[i] * permutation_matrix
+        self.entity_transition_probs = S * 0.1 + np.eye(num_entities) * 0.9
+
+        # start
+        S_s = (np.random.random(num_entities) - 0.5) / 10
+        S_s = np.exp(S_s) / np.sum(np.exp(S_s))
+        self.start_entity_probs = S_s
+    
+    def sample(self, length: int):
+        entity = np.random.choice(self.num_entities, p=self.start_entity_probs)
+        property = np.random.choice(self.num_properties, p=self.start_property_probs)
+        emissions, entities, properties = [], [], []
+        for _ in range(length):
+            entities.append(entity)
+            properties.append(property)
+            emissions.append(entity * self.num_properties + property)
+            entity = np.random.choice(self.num_entities, p=self.entity_transition_probs[entity])
+            property = np.random.choice(self.num_properties, p=self.property_transition_probs[property])
+        return emissions, list(zip(entities, properties))
 
 
 class HMM:
@@ -41,12 +97,18 @@ class HMM:
 
 class MixtureOfHmms:
     num_hmms: int
-    hmms: list[HMM]
+    hmms: list[Union[HMM, XieHMM]]
     weights: np.ndarray # shape: (num_hmms,)
 
-    def __init__(self, num_hmms: int, num_hidden_states: int, num_emissions: int, uniform_weights: bool=False):
+    def __init__(self, num_hmms: int, num_hidden_states: int, num_emissions: int,
+                 uniform_weights: bool=False, xie: bool=False):
         self.num_hmms = num_hmms
-        self.hmms = [HMM(num_hidden_states, num_emissions) for _ in range(num_hmms)]
+
+        if xie:
+            self.hmms = [XieHMM(num_hidden_states, num_emissions) for _ in range(num_hmms)]
+        else:
+            self.hmms = [HMM(num_hidden_states, num_emissions) for _ in range(num_hmms)]
+        
         if uniform_weights:
             self.weights = np.ones(num_hmms) / num_hmms
         else:
