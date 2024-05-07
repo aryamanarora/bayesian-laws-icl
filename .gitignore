@@ -1,3 +1,6 @@
 __pycache__/
 test/
 wandb/
+plots/
+plots_1/
+sus/
