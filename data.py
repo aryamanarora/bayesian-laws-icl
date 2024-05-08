@@ -4,183 +4,216 @@ from torch.utils.data import Dataset
 from typing import Union
 from collections import defaultdict
 from copy import deepcopy
+import contextlib
+from hmmlearn.hmm import CategoricalHMM
+import random
+import matplotlib.pyplot as plt
+
+
+def softmax(x, temp=1.0, axis=None):
+    x /= temp
+    if axis is None:
+        x -= np.amax(x)
+        return np.exp(x) / np.sum(np.exp(x))
+    else:
+        x -= np.expand_dims(np.amax(x, axis=axis), axis=axis)
+        return np.exp(x) / np.expand_dims(np.sum(np.exp(x), axis=axis), axis=axis)
+
+
+def generate_transmat_block(
+        n_components, perm_samples=10, transition_temp=1.0):
+    mixing = softmax(np.random.rand(perm_samples) - 0.5, transition_temp)
+    mixing = mixing[:, np.newaxis, np.newaxis]
+    perm_samples = [np.eye(n_components)[np.random.permutation(n_components)] for i in range(perm_samples)]
+    transmat = np.sum(mixing * perm_samples, axis=0)
+
+    return transmat
+
+
+def combine_transmats(mat1, mat2):
+    # combine by tiling mat1 and scaling with mat2
+    n = mat1.shape[0]
+    m = mat2.shape[0]
+    mat = np.zeros((m*n, m*n))
+    for i in range(m):
+        for j in range(m):
+            mat[i*n: (i+1)*n, j*n: (j+1)*n] = mat1 * mat2[i,j]
+    return mat
+
+
+@contextlib.contextmanager
+def local_seed(seed):
+    state = np.random.get_state()
+    np.random.seed(seed)
+    try:
+        yield
+    finally:
+        np.random.set_state(state)
+
+
+def generate_hmm_parameters(
+        n_values: int, n_slots: int, n_symbols: int, all_values, perm_samples=10, transition_temp=1.0,
+        start_temp=1.0, value_transmat_id_coeff=0.8, value_transmat_seed=1112, prior_values=False
+    ):
+    n_components = n_values * n_slots
+
+    # generate parameters for HMM
+    startprob = softmax(np.random.rand(n_components) - 0.5, start_temp)
+
+    slot_transmat = generate_transmat_block(
+            n_slots, perm_samples=n_slots, transition_temp=transition_temp)
+
+    if prior_values:
+        value_transmat = generate_transmat_block(
+                n_values, perm_samples=n_values, transition_temp=transition_temp)
+        # bias the value transmat towards identity
+        value_transmat = (1-value_transmat_id_coeff) * value_transmat + value_transmat_id_coeff * np.eye(n_values)
+    else:
+        with local_seed(value_transmat_seed):
+            value_transmat = generate_transmat_block(
+                    n_values, perm_samples=n_values, transition_temp=transition_temp)
+            # bias the value transmat towards identity
+            value_transmat = (1-value_transmat_id_coeff) * value_transmat + value_transmat_id_coeff * np.eye(n_values)
+
+    transmat = combine_transmats(slot_transmat, value_transmat)
+
+    # this is actually the same for all hmms, given all_values
+    emissionprob = np.zeros((n_components, n_symbols))
+    for i in range(n_components):
+        # deterministic given slot and value vector
+        slot_idx = i % n_slots
+        value_idx = i // n_slots
+        emissionprob[i, all_values[value_idx, slot_idx]] = 1
+
+    return startprob, transmat, emissionprob, slot_transmat, value_transmat
 
 
 class XieHMM:
     num_entities: int
     num_properties: int
+    num_hidden_states: int
     entity_transition_probs: np.ndarray # shape: (num_entities, num_entities)
     property_transition_probs: np.ndarray # shape: (num_properties, num_properties)
     start_entity_probs: np.ndarray # shape: (num_entities,)
     start_property_probs: np.ndarray # shape: (num_properties,)
 
     def __init__(
-        self, num_entities: int, num_properties: int, vocab_size: int=100,
-        entity_transition_probs: np.ndarray=None, emission_mapping: np.ndarray=None,
+        self, num_entities: int, num_properties: int, vocab_size: int, all_values: np.ndarray,
+        transition_temp: float, start_temp: float, value_transmat_id_coeff: float,
+        value_transmat_seed: float,
     ):
+        
+        # init params
         self.num_entities = num_entities
         self.num_properties = num_properties
+        self.vocab_size = vocab_size
         self.num_hidden_states = num_entities * num_properties
+        self.num_perm_samples = self.num_hidden_states
 
-        # generate property probs
-        # first need 100 random permutation matrices of size (num_properties, num_properties)
-        weights = (np.random.random(100) - 0.5) / 0.1
-        weights = np.exp(weights) / np.sum(np.exp(weights))
-        T = np.zeros((num_properties, num_properties))
-        for i in range(100):
-            permutation_matrix = np.random.permutation(np.eye(num_properties))
-            T += weights[i] * permutation_matrix
-        self.property_transition_probs = T
+        # make hmm params
+        startprob, transmat, emissionprob, slot_transmat, value_transmat = generate_hmm_parameters(
+            self.num_entities,
+            self.num_properties,
+            self.vocab_size,
+            all_values,
+            self.num_perm_samples,
+            transition_temp,
+            start_temp,
+            value_transmat_id_coeff,
+            value_transmat_seed,
+        )
+        self.slot_transmat = slot_transmat
+        self.value_transmat = value_transmat
 
-        # start
-        T_s = (np.random.random(num_properties) - 0.5) / 10
-        T_s = np.exp(T_s) / np.sum(np.exp(T_s))
-        self.start_property_probs = T_s
+        # make hmm
+        self.hmm = CategoricalHMM(n_components=self.num_hidden_states)
+        self.hmm.startprob_ = startprob
+        self.hmm.transmat_ = transmat
+        self.hmm.emissionprob_ = emissionprob
 
-        # generate entity probs
-        # same process
-        if entity_transition_probs is None:
-            weights = (np.random.random(100) - 0.5) / 0.1
-            weights = np.exp(weights) / np.sum(np.exp(weights))
-            S = np.zeros((num_entities, num_entities))
-            for i in range(100):
-                permutation_matrix = np.random.permutation(np.eye(num_entities))
-                S += weights[i] * permutation_matrix
-            self.entity_transition_probs = S * 0.1 + np.eye(num_entities) * 0.9
-        else:
-            self.entity_transition_probs = entity_transition_probs
+        # plot transmat
+        plt.imshow(transmat)
+        plt.savefig("transmat.png")
 
-        S_s = (np.random.random(num_entities) - 0.5) / 10
-        S_s = np.exp(S_s) / np.sum(np.exp(S_s))
-        self.start_entity_probs = S_s
 
-        # combine entity and property transitions/start probs into one matrix
-        transition = np.zeros((num_entities * num_properties, num_entities * num_properties))
-        for i in range(num_entities):
-            for j in range(num_entities):
-                transition[
-                    i * num_properties: (i + 1) * num_properties, j * num_properties: (j + 1) * num_properties
-                ] = self.property_transition_probs * self.entity_transition_probs[i, j]
-        self.state_transition_probs = transition
+    def sample_from_hmm(self, length: int, seed=None):
+        x, h = self.hmm.sample(n_samples=length, random_state=seed)
+        return x.T[0], h
 
-        start = np.zeros(num_entities * num_properties)
-        for i in range(num_entities):
-            start[i * num_properties: (i + 1) * num_properties] = self.start_property_probs * self.start_entity_probs[i]
-        self.start_state_probs = start
 
-        # emission mapping
-        if emission_mapping is None:
-            # self.emission_mapping = np.arange(1, num_entities * num_properties + 1).reshape((num_entities, num_properties))
-            self.emission_mapping = np.random.randint(low=1, high=vocab_size, size=(num_entities, num_properties))
-            self.emission_mapping[:, 0] = 0 # delimiter
-            self.emission_mapping = self.emission_mapping.flatten()
-        else:
-            self.emission_mapping = emission_mapping
-
-        # also store as probs
-        self.emission_probs = np.zeros((num_entities * num_properties, vocab_size))
-        for i in range(self.num_hidden_states):
-            self.emission_probs[i, self.emission_mapping[i]] = 1
-    
-    def sample(self, length: int, return_argmax: bool=False):
-        state = np.random.choice(self.num_hidden_states, p=self.start_state_probs)
-        states, emissions = [], []
-        argmaxes = []
+    def generate_hiddens_from_state(self, start_state: int, length: int):
+        hiddens = [start_state]
         for _ in range(length):
-            states.append(state)
-            emissions.append(self.emission_mapping[state])
-            if return_argmax:
-                argmax_state = np.argmax(self.state_transition_probs[state])
-                argmaxes.append(self.emission_mapping[argmax_state])
-            state = np.random.choice(self.num_hidden_states, p=self.state_transition_probs[state])
-
-        if return_argmax:
-            return emissions, states, argmaxes
-        
-        return emissions, states
+            hiddens.append(np.random.choice(self.hmm.transmat_.shape[1], p=self.hmm.transmat_[hiddens[-1], :]))
+        return hiddens
     
-    def score(self, emissions: list[int]):
-        length = len(emissions)
-        scores = np.zeros((length, self.num_hidden_states)) # in log space
-        for i in range(self.num_hidden_states):
-            scores[0, i] = np.log(self.start_state_probs[i]) + np.log(self.emission_probs[i, emissions[0]])
-        for i in range(1, length):
-            for j in range(self.num_hidden_states):
-                temp = [scores[i - 1, k] + np.log(self.state_transition_probs[k, j]) + np.log(self.emission_probs[j, emissions[i]])
-                        for k in range(self.num_hidden_states)]
-                scores[i, j] = np.logaddexp.reduce(temp)
-        return np.logaddexp.reduce(scores[-1])
-
-
-class HMM:
-    num_hidden_states: int
-    num_emissions: int
-    state_transition_probs: np.ndarray # shape: (num_hidden_states, num_hidden_states)
-    emission_probs: np.ndarray # shape: (num_hidden_states, num_emissions)
-    start_state_probs: np.ndarray # shape: (num_hidden_states,)
-
-    def __init__(self, num_hidden_states: int, num_emissions: int):
-        self.num_hidden_states = num_hidden_states
-        self.num_emissions = num_emissions
-        self.state_transition_probs = np.random.dirichlet(np.ones(num_hidden_states), size=num_hidden_states)
-        self.emission_probs = np.random.dirichlet(np.ones(num_emissions), size=num_hidden_states)
-        self.start_state_probs = np.random.dirichlet(np.ones(num_hidden_states), size=1)[0]
     
-    def sample(self, length: int):
-        state = np.random.choice(self.num_hidden_states, p=self.start_state_probs)
-        states, emissions = [], []
-        for _ in range(length):
-            states.append(state)
-            emissions.append(np.random.choice(self.num_emissions, p=self.emission_probs[state]))
-            state = np.random.choice(self.num_hidden_states, p=self.state_transition_probs[state])
-        return emissions, states
-    
-    def score(self, emissions: list[int]):
-        length = len(emissions)
-        scores = np.zeros((length, self.num_hidden_states)) # in log space
-        for i in range(self.num_hidden_states):
-            scores[0, i] = np.log(self.start_state_probs[i]) + np.log(self.emission_probs[i, emissions[0]])
-        for i in range(1, length):
-            for j in range(self.num_hidden_states):
-                temp = [scores[i - 1, k] + np.log(self.state_transition_probs[k, j]) + np.log(self.emission_probs[j, emissions[i]])
-                        for k in range(self.num_hidden_states)]
-                scores[i, j] = np.logaddexp.reduce(temp)
-        return np.logaddexp.reduce(scores[-1])
+    # def score(self, emissions: list[int]):
+    #     length = len(emissions)
+    #     scores = np.zeros((length, self.num_hidden_states)) # in log space
+    #     for i in range(self.num_hidden_states):
+    #         scores[0, i] = np.log(self.start_state_probs[i]) + np.log(self.emission_probs[i, emissions[0]])
+    #     for i in range(1, length):
+    #         for j in range(self.num_hidden_states):
+    #             temp = [scores[i - 1, k] + np.log(self.state_transition_probs[k, j]) + np.log(self.emission_probs[j, emissions[i]])
+    #                     for k in range(self.num_hidden_states)]
+    #             scores[i, j] = np.logaddexp.reduce(temp)
+    #     return np.logaddexp.reduce(scores[-1])
 
 
 class MixtureOfHmms:
     num_hmms: int
-    hmms: list[Union[HMM, XieHMM]]
+    hmms: XieHMM
     weights: np.ndarray # shape: (num_hmms,)
 
-    def __init__(self, num_hmms: int, num_entities: int, num_properties: int,
-                 num_emissions: int=100, uniform_weights: bool=False):
-                 
+    def __init__(
+        self, num_hmms: int, num_entities: int, num_properties: int,
+        vocab_size: int=100
+    ):
+        # basic params
         self.num_hmms = num_hmms
         self.hmms = []
-        for i in range(num_hmms):
-            if i == 0:
-                self.hmms.append(XieHMM(num_entities, num_properties, num_emissions))
-            else:
-                self.hmms.append(XieHMM(
-                    num_entities, num_properties, num_emissions,
-                    entity_transition_probs=self.hmms[0].entity_transition_probs,
-                    emission_mapping=self.hmms[0].emission_mapping,
-                ))
-        
-        if uniform_weights:
-            self.weights = np.ones(num_hmms) / num_hmms
-        else:
-            self.weights = np.random.dirichlet(np.ones(num_hmms), size=1)[0]
+        self.num_entities = num_entities # value
+        self.num_properties = num_properties # slot
+
+        # seed
+        seed = 1111
+        np.random.seed(seed)
+        random.seed(seed+2)
+
+        # num_values number of num_slots sized lists of vocab words
+        self.all_values = np.random.randint(low=1, high=vocab_size, size=(num_entities, num_properties))
+        # make sure every row has a delimiter
+        self.all_values[:, 0] = 0
+
+        # make hmms
+        for _ in range(self.num_hmms):
+            hmm = XieHMM(
+                num_entities=num_entities, num_properties=num_properties, vocab_size=vocab_size,
+                all_values=self.all_values, transition_temp=0.1, start_temp=10.0, value_transmat_id_coeff=0.9,
+                value_transmat_seed=seed + 3,
+            )
+            self.hmms.append(hmm)
     
-    def sample(self, length: int, hmm=None, **kwargs):
-        if hmm is None:
-            hmm = np.random.choice(self.num_hmms, p=self.weights)
-        return self.hmms[hmm].sample(length, **kwargs), hmm
+
+    def sample(self, num_samples: int, length: int):
+        all_emissions, all_states, all_hmms = [], [], []
+        for _ in tqdm(range(num_samples)):
+            hmm = np.random.choice(self.num_hmms)
+            emissions, states = self.hmms[hmm].sample_from_hmm(length)
+            all_emissions.append(emissions)
+            all_states.append(states)
+            all_hmms.append(hmm)
+        return all_emissions, all_states, all_hmms
+
+
+    def __getitem__(self, idx):
+        return self.hmms[idx]
     
-    def score(self, emissions: list[int]):
-        scores = [np.log(self.weights[i]) + self.hmms[i].score(emissions) for i in range(self.num_hmms)]
-        return scores
+
+    # def score(self, emissions: list[int]):
+    #     scores = [np.log(self.weights[i]) + self.hmms[i].score(emissions) for i in range(self.num_hmms)]
+    #     return scores
     
 
 class HMMDataset(Dataset):
@@ -193,15 +226,35 @@ class HMMDataset(Dataset):
         self.block_size = 1024
 
         # generate data
-        for _ in tqdm(range(num_train_examples)):
-            (emissions, states), src_hmm = self.hmms.sample(sample_length, hmm=hmm)
-            for start in range(0, sample_length, self.block_size):
-                end = min(start + self.block_size, sample_length)
-                self.emissions.append(emissions[start:end])
-                self.states.append(states[start:end])
-                self.hmm.append(src_hmm)
+        emissions, states, hmm = hmms.sample(num_train_examples, sample_length)
 
-        self.length = len(self.hmm)
+        # concatenate and make `block_size`-sized chunks
+        for i in range(0, num_train_examples * sample_length, self.block_size):
+            cur_doc = i // sample_length
+            cur_pos = i % sample_length
+            next_doc = (i + self.block_size) // sample_length
+            next_pos = (i + self.block_size) % sample_length
+            chunk_emissions, chunk_states = [], []
+            for j in range(cur_doc, next_doc + 1):
+                if j >= num_train_examples:
+                    continue
+                if cur_doc == next_doc:
+                    chunk_emissions.extend(emissions[j][cur_pos:next_pos])
+                    chunk_states.extend(states[j][cur_pos:next_pos])
+                elif j == cur_doc:
+                    chunk_emissions.extend(emissions[j][cur_pos:])
+                    chunk_states.extend(states[j][cur_pos:])
+                elif j == next_doc:
+                    chunk_emissions.extend(emissions[j][:next_pos])
+                    chunk_states.extend(states[j][:next_pos])
+                else:
+                    chunk_emissions.extend(emissions[j])
+                    chunk_states.extend(states[j])
+            self.emissions.append(chunk_emissions)
+            self.states.append(chunk_states)
+
+        # length
+        self.length = len(self.emissions)
     
     def __len__(self):
         return self.length
@@ -211,7 +264,6 @@ class HMMDataset(Dataset):
             "input_ids": self.emissions[idx],
             "labels": self.emissions[idx],
             "states": self.states[idx],
-            "hmm": self.hmm[idx],
         }
     
     def make_subsets(self):
@@ -228,36 +280,57 @@ class HMMInContextDataset(Dataset):
         self.hmms = hmms
         self.length = num_train_examples
         self.emissions = []
-        self.states = []
+        self.properties = []
+        self.entities = []
         self.labels = []
         self.hmm = []
 
         # generate data
         for _ in tqdm(range(self.length)):
-            hmm = np.random.choice(self.hmms.num_hmms, p=self.hmms.weights)
-            emissions_doc = []
-            states_doc = []
-            labels_doc = []
-            for i in range(num_in_context_shots):
+            hmm = np.random.choice(list(range(self.hmms.num_hmms)))
+            properties = []
+            entities = []
+            labels = []
 
-                # in-context example
-                (emissions, states, labels), _ = self.hmms.sample(k, hmm=hmm, return_argmax=True)
+            # choose start such that we sample one start slot
+            start_property = np.random.randint(low=1, high=self.hmms.num_properties) # slot
+            
+            for shot in range(num_in_context_shots):
+                start_entity = np.random.randint(low=0, high=self.hmms.num_entities) # value
+                start_hidden_idx = start_entity * self.hmms.num_properties + start_property
+                
+                # make cur examples
+                h = self.hmms[hmm].generate_hiddens_from_state(start_hidden_idx, length=k - 1)
+                cur_properties = [hidden % self.hmms.num_properties for hidden in h]
+                cur_entities = [hidden // self.hmms.num_properties for hidden in h]
+                properties += cur_properties
+                entities += cur_entities
 
-                emissions_doc.extend(emissions)
-                states_doc.extend(states)
-                labels_doc.extend(labels)
+                # labels
+                cur_labels = [np.argmax(self.hmms[hmm].hmm.transmat_[hidden, :]) for hidden in h]
+                cur_labels = [self.hmms.all_values[hidden // self.hmms.num_properties, hidden % self.hmms.num_properties] for hidden in cur_labels]
+                labels += cur_labels
+
+                # print(shot)
+                # print("entities:", cur_entities)
+                # print("properties:", cur_properties)
+                # print("inputs:", [self.hmms.all_values[cur_entities[j], cur_properties[j]] for j in range(len(cur_properties))])
+                # print("labels:", cur_labels)
+                # input()
 
                 # delimiter
-                if i != num_in_context_shots - 1:
-                    emissions_doc.append(0)
-                    states_doc.append(0)
-                    labels_doc.append(0)
+                properties += [0]
+                entities += [entities[-1]]
+                labels += [0]
             
             # add doc
+            prompt = [self.hmms.all_values[entities[j], properties[j]] for j in range(len(properties))]
+
             self.hmm.append(hmm)
-            self.emissions.append(emissions_doc)
-            self.states.append(states_doc)
-            self.labels.append(labels_doc)
+            self.emissions.append(prompt)
+            self.properties.append(properties)
+            self.entities.append(entities)
+            self.labels.append(labels)
     
     def __len__(self):
         return self.length
@@ -266,7 +339,8 @@ class HMMInContextDataset(Dataset):
         return {
             "input_ids": self.emissions[idx],
             "labels": self.labels[idx],
-            "states": self.states[idx],
+            "entities": self.entities[idx],
+            "properties": self.properties[idx],
             "hmm": self.hmm[idx],
         }
     
