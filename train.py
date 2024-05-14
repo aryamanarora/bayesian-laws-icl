@@ -58,7 +58,7 @@ class TrainingArguments(transformers.TrainingArguments):
     save_strategy: str = field(default="no")
     
 
-def in_context_eval(trainer, in_context_dataset, data_args):
+def in_context_eval(trainer, in_context_dataset, k):
 
     # what does the data look like? e.g. k = 3
     # h1 a1 b1 / h2 a2 b2 / h3 a3 b3
@@ -71,21 +71,20 @@ def in_context_eval(trainer, in_context_dataset, data_args):
     for hmm, subset in subsets.items():
         result = trainer.predict(subset)
         probs = torch.tensor(result.predictions).softmax(-1) # shape: (bs, seq, num_emissions)
-        shots = 0
-        for i in range(data_args.k - 2, probs.shape[1], data_args.k + 1):
+        for i in range(k - 2, probs.shape[1], k + 1):
+            shots = i // (k + 1)
             label = result.label_ids[:, i] # shape: (bs,)
             # get the prob of the correct label for each example
             prob = probs[torch.arange(probs.shape[0]), i, label]
             argmax = probs[torch.arange(probs.shape[0]), i].argmax(-1)
             for j in range(len(prob)):
                 in_context_probs.append({
-                    "k": shots,
+                    "shots": shots,
                     "prob": prob[j].item(),
                     "acc": 1 if (argmax[j] == label[j]).item() else 0,
                     "nll": -torch.log(prob[j]).item(),
                     "hmm": str(hmm)
                 })
-            shots += 1
     
     return in_context_probs
 
@@ -157,7 +156,7 @@ def train():
     # in-context eval
     pretrain_in_context = []
     for k, in_context_dataset in in_context_datasets.items():
-        more = in_context_eval(trainer, in_context_dataset, data_args)
+        more = in_context_eval(trainer, in_context_dataset, k)
         for m in more:
             m["k"] = k
         pretrain_in_context.extend(more)
@@ -187,7 +186,7 @@ def train():
     # in-context eval
     sft_in_context = []
     for k, in_context_dataset in in_context_datasets.items():
-        more = in_context_eval(trainer, in_context_dataset, data_args)
+        more = in_context_eval(trainer, in_context_dataset, k)
         for m in more:
             m["k"] = k
         sft_in_context.extend(more)
@@ -203,35 +202,37 @@ def train():
         in_context_probs.append(d)
     
     df = pd.DataFrame(in_context_probs)
+    df = df.groupby(["shots", "k", "hmm", "sft"]).mean().reset_index()
     plot = (
-        ggplot(df, aes(x="k", y="acc", color="sft")) +
+        ggplot(df, aes(x="shots", y="acc", color="sft")) +
         # geom_point(alpha=0.1, stroke=0) +
-        facet_grid("k", "hmm") + ylim(0, 1) +
+        facet_grid("k~hmm") + ylim(0, 1) +
         stat_summary(geom="line")
     )
-    plot.save(f"{trainer.args.output_dir}/{title}.png")
+    plot.save(f"{trainer.args.output_dir}/{title}.pdf")
     plot = (
-        ggplot(df, aes(x="k", y="prob", color="sft")) +
+        ggplot(df, aes(x="shots", y="prob", color="sft")) +
         # geom_point(alpha=0.1, stroke=0) +
-        facet_grid("k", "hmm") +
+        facet_grid("k~hmm") +
         stat_summary(geom="line")
     )
-    plot.save(f"{trainer.args.output_dir}/{title}_p.png")
+    plot.save(f"{trainer.args.output_dir}/{title}_p.pdf")
     plot = (
-        ggplot(df, aes(x="k", y="nll", color="sft")) +
+        ggplot(df, aes(x="shots", y="nll", color="sft")) +
         # geom_point(alpha=0.1, stroke=0) +
-        facet_grid("k", "hmm") +
+        facet_grid("k~hmm") +
         stat_summary(geom="line") +
         scale_y_log10() + scale_x_log10()
     )
-    plot.save(f"{trainer.args.output_dir}/{title}_nll.png")
+    plot.save(f"{trainer.args.output_dir}/{title}_nll.pdf")
     plot = (
-        ggplot(df, aes(x="k", y="acc", color="sft")) +
+        ggplot(df, aes(x="shots", y="acc", color="sft")) +
         # geom_point(alpha=0.1, stroke=0) +
+        facet_grid("~k") +
         ylim(0, 1) +
         stat_summary(geom="line")
     )
-    plot.save(f"{trainer.args.output_dir}/{title}_all.png")
+    plot.save(f"{trainer.args.output_dir}/{title}_all.pdf")
 
 
 if __name__ == "__main__":
