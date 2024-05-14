@@ -203,6 +203,10 @@ def train():
     
     df = pd.DataFrame(in_context_probs)
     df = df.groupby(["shots", "k", "hmm", "sft"]).mean().reset_index()
+
+    # save df
+    df.to_csv(f"{trainer.args.output_dir}/{title}.csv")
+
     plot = (
         ggplot(df, aes(x="shots", y="acc", color="sft")) +
         # geom_point(alpha=0.1, stroke=0) +
