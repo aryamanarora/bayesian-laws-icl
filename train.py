@@ -9,15 +9,18 @@ import numpy as np
 from collections import defaultdict
 
 import pandas as pd
-from plotnine import ggplot, aes, geom_point, facet_wrap, geom_line, stat_summary
+from plotnine import ggplot, aes, geom_point, facet_wrap, facet_grid, geom_line, stat_summary, ylim
 from plotnine.scales import scale_y_log10, scale_x_log10
 
 device = "cpu" if not torch.cuda.is_available() else "cuda"
+
+K = [3, 5, 8, 10]
 
 @dataclass
 class ModelArguments:
     model_type: str = field(default="gpt2", metadata={"help": "Model architecture."})
     num_hidden_layers: int = field(default=4, metadata={"help": "Number of layers in the transformer."})
+    ideal: bool = field(default=False)
 
 
 @dataclass
@@ -39,6 +42,7 @@ class TrainingArguments(transformers.TrainingArguments):
     report_to: str = field(default="wandb", metadata={"help": "Where to report metrics."})
     logging_steps: int = field(default=10, metadata={"help": "Log every n steps."})
     logging_strategy: str = field(default="steps", metadata={"help": "Log every n steps or every n epochs."})
+    evaluation_strategy: str = field(default="epoch", metadata={"help": "Evaluate every n steps or every n epochs."})
     remove_unused_columns: bool = field(default=True)
     wandb_project: str = field(default="toy-alignment")
     wandb_entity: str = field(default="aryamanarora")
@@ -50,18 +54,25 @@ class TrainingArguments(transformers.TrainingArguments):
     learning_rate: float = field(default=8e-4)
     warmup_steps: float = field(default=1000)
     data_args: dict = field(default_factory=dict)
+    model_args: dict = field(default_factory=dict)
+    save_strategy: str = field(default="no")
     
 
+def in_context_eval(trainer, in_context_dataset, data_args):
 
-def in_context_eval(trainer, in_context_dataset, data_args, title="in_context_probs"):
-    # in-context eval
+    # what does the data look like? e.g. k = 3
+    # h1 a1 b1 / h2 a2 b2 / h3 a3 b3
+    # 0  1  2  3 4  5  6  7 8  9  10
+    #    ^          ^          ^
+    # we eval at ^
+
     subsets = in_context_dataset.make_subsets()
     in_context_probs = []
     for hmm, subset in subsets.items():
         result = trainer.predict(subset)
         probs = torch.tensor(result.predictions).softmax(-1) # shape: (bs, seq, num_emissions)
         shots = 0
-        for i in range(data_args.k - 1, probs.shape[1], data_args.k + 1):
+        for i in range(data_args.k - 2, probs.shape[1], data_args.k + 1):
             label = result.label_ids[:, i] # shape: (bs,)
             # get the prob of the correct label for each example
             prob = probs[torch.arange(probs.shape[0]), i, label]
@@ -76,42 +87,14 @@ def in_context_eval(trainer, in_context_dataset, data_args, title="in_context_pr
                 })
             shots += 1
     
-    # plot each
-    df = pd.DataFrame(in_context_probs)
-    plot = (
-        ggplot(df, aes(x="k", y="acc")) +
-        # geom_point(alpha=0.1, stroke=0) +
-        facet_wrap("~hmm") +
-        stat_summary(group="k", geom="line")
-    )
-    plot.save(f"{trainer.args.output_dir}/{title}.png")
-    plot = (
-        ggplot(df, aes(x="k", y="prob")) +
-        geom_point(alpha=0.1, stroke=0) +
-        facet_wrap("~hmm") +
-        stat_summary(group="k", geom="line")
-    )
-    plot.save(f"{trainer.args.output_dir}/{title}_p.png")
-    plot = (
-        ggplot(df, aes(x="k", y="nll")) +
-        # geom_point(alpha=0.1, stroke=0) +
-        facet_wrap("~hmm") +
-        stat_summary(group="k", geom="line") +
-        scale_y_log10() + scale_x_log10()
-    )
-    plot.save(f"{trainer.args.output_dir}/{title}_nll.png")
-    plot = (
-        ggplot(df, aes(x="k", y="acc")) +
-        # geom_point(alpha=0.1, stroke=0) +
-        stat_summary(group="k", geom="line")
-    )
-    plot.save(f"{trainer.args.output_dir}/{title}_all.png")
+    return in_context_probs
 
 
 def train():
     parser = transformers.HfArgumentParser((ModelArguments, DataArguments, TrainingArguments))
     model_args, data_args, training_args = parser.parse_args_into_dataclasses()
     training_args.data_args = asdict(data_args)
+    training_args.model_args = asdict(model_args)
 
     # wandb setup
     os.environ['WANDB_ENTITY'] = training_args.wandb_entity
@@ -141,13 +124,13 @@ def train():
     )
     train_dataset = HMMDataset(hmms=hmms, num_train_examples=data_args.num_train_examples, sample_length=10240)
     eval_dataset = HMMDataset(hmms=hmms, num_train_examples=data_args.num_eval_examples, sample_length=1024)
-    in_context_dataset = HMMInContextDataset(
-        hmms=hmms, num_train_examples=data_args.num_in_context_examples,
-        k=data_args.k, num_in_context_shots=data_args.num_in_context_shots
-    )
-    print("train_dataset:", len(train_dataset))
-    print("eval_dataset:", len(eval_dataset))
-    print("in_context_dataset:", len(in_context_dataset))
+    in_context_datasets = {}
+    for k in K:
+        in_context_datasets[k] = HMMInContextDataset(
+            hmms=hmms, num_train_examples=data_args.num_in_context_examples,
+            k=k, num_in_context_shots=data_args.num_in_context_shots
+        )
+        print(f"in_context_datasets[{k}]:", len(in_context_datasets[k]))
 
     # print(torch.tensor(hmms.score(train_dataset[0]["input_ids"][:20])).softmax(-1))
     # input()
@@ -161,24 +144,34 @@ def train():
     )
     trainer.train()
 
+    # evaluate
+    trainer.evaluate()
+
     # # eval
     # subsets = eval_dataset.make_subsets()
-    # results = defaultdict(dict)
+    results = defaultdict(dict)
     # for hmm, subset in subsets.items():
     #     res = trainer.evaluate(eval_dataset=subset, metric_key_prefix=f'eval_{hmm}')
     #     results[hmm]["base"] = res[f'eval_{hmm}_loss']
 
     # in-context eval
-    in_context_eval(trainer, in_context_dataset, data_args, title="in_context_probs")
+    pretrain_in_context = []
+    for k, in_context_dataset in in_context_datasets.items():
+        more = in_context_eval(trainer, in_context_dataset, data_args)
+        for m in more:
+            m["k"] = k
+        pretrain_in_context.extend(more)
 
     # sft
     # old_weights = deepcopy(hmms.weights)
     hmms.weights = np.zeros(hmms.num_hmms)
-    hmms.weights[0] = 1
-    sft_dataset = HMMDataset(hmms=hmms, num_train_examples=data_args.num_train_examples // 100, sample_length=10240)
+    hmms.weights[0] = 0.5
+    hmms.weights[1] = 0.5
+    sft_dataset = HMMDataset(hmms=hmms, num_train_examples=max(1, data_args.num_train_examples // 20), sample_length=10240)
 
     # train
     trainer.train_dataset = sft_dataset
+    trainer.args.num_train_epochs = 1
     trainer.train()
 
     # # eval
@@ -187,12 +180,58 @@ def train():
     #     res = trainer.evaluate(eval_dataset=subset, metric_key_prefix=f'sft_eval_{hmm}')
     #     results[hmm]["sft"] = res[f'sft_eval_{hmm}_loss']
     
-    # # print
-    # for hmm in sorted(list(results.keys())):
-    #     print(f"{hmm}: {results[hmm]['base']:.4f} -> {results[hmm]['sft']:.4f}")
+    # print
+    for hmm in sorted(list(results.keys())):
+        print(f"{hmm}: {results[hmm]['base']:.4f} -> {results[hmm]['sft']:.4f}")
 
     # in-context eval
-    in_context_eval(trainer, in_context_dataset, data_args, title="in_context_probs_sft")
+    sft_in_context = []
+    for k, in_context_dataset in in_context_datasets.items():
+        more = in_context_eval(trainer, in_context_dataset, data_args)
+        for m in more:
+            m["k"] = k
+        sft_in_context.extend(more)
+
+    # plot each
+    title = "in_context_probs"
+    in_context_probs = []
+    for d in pretrain_in_context:
+        d["sft"] = False
+        in_context_probs.append(d)
+    for d in sft_in_context:
+        d["sft"] = True
+        in_context_probs.append(d)
+    
+    df = pd.DataFrame(in_context_probs)
+    plot = (
+        ggplot(df, aes(x="k", y="acc", color="sft")) +
+        # geom_point(alpha=0.1, stroke=0) +
+        facet_grid("k", "hmm") + ylim(0, 1) +
+        stat_summary(geom="line")
+    )
+    plot.save(f"{trainer.args.output_dir}/{title}.png")
+    plot = (
+        ggplot(df, aes(x="k", y="prob", color="sft")) +
+        # geom_point(alpha=0.1, stroke=0) +
+        facet_grid("k", "hmm") +
+        stat_summary(geom="line")
+    )
+    plot.save(f"{trainer.args.output_dir}/{title}_p.png")
+    plot = (
+        ggplot(df, aes(x="k", y="nll", color="sft")) +
+        # geom_point(alpha=0.1, stroke=0) +
+        facet_grid("k", "hmm") +
+        stat_summary(geom="line") +
+        scale_y_log10() + scale_x_log10()
+    )
+    plot.save(f"{trainer.args.output_dir}/{title}_nll.png")
+    plot = (
+        ggplot(df, aes(x="k", y="acc", color="sft")) +
+        # geom_point(alpha=0.1, stroke=0) +
+        ylim(0, 1) +
+        stat_summary(geom="line")
+    )
+    plot.save(f"{trainer.args.output_dir}/{title}_all.png")
 
 
 if __name__ == "__main__":

@@ -175,6 +175,7 @@ class MixtureOfHmms:
         self.hmms = []
         self.num_entities = num_entities # value
         self.num_properties = num_properties # slot
+        self.weights = np.ones(num_hmms) / num_hmms
 
         # seed
         seed = 1111
@@ -199,7 +200,7 @@ class MixtureOfHmms:
     def sample(self, num_samples: int, length: int):
         all_emissions, all_states, all_hmms = [], [], []
         for _ in tqdm(range(num_samples)):
-            hmm = np.random.choice(self.num_hmms)
+            hmm = np.random.choice(self.num_hmms, p=self.weights)
             emissions, states = self.hmms[hmm].sample_from_hmm(length)
             all_emissions.append(emissions)
             all_states.append(states)
@@ -217,41 +218,49 @@ class MixtureOfHmms:
     
 
 class HMMDataset(Dataset):
-    def __init__(self, hmms: MixtureOfHmms, num_train_examples: int=10000, sample_length: int=1000, hmm: int=None):
+    def __init__(
+        self, hmms: MixtureOfHmms, num_train_examples: int=10000, sample_length: int=1000, hmm: int=None,
+        block_size: int=1024,
+    ):
         super(HMMDataset, self).__init__()
         self.hmms = hmms
         self.emissions = []
         self.states = []
         self.hmm = []
-        self.block_size = 1024
+        self.block_size = block_size
 
         # generate data
         emissions, states, hmm = hmms.sample(num_train_examples, sample_length)
 
         # concatenate and make `block_size`-sized chunks
-        for i in range(0, num_train_examples * sample_length, self.block_size):
-            cur_doc = i // sample_length
-            cur_pos = i % sample_length
-            next_doc = (i + self.block_size) // sample_length
-            next_pos = (i + self.block_size) % sample_length
-            chunk_emissions, chunk_states = [], []
-            for j in range(cur_doc, next_doc + 1):
-                if j >= num_train_examples:
-                    continue
-                if cur_doc == next_doc:
-                    chunk_emissions.extend(emissions[j][cur_pos:next_pos])
-                    chunk_states.extend(states[j][cur_pos:next_pos])
-                elif j == cur_doc:
-                    chunk_emissions.extend(emissions[j][cur_pos:])
-                    chunk_states.extend(states[j][cur_pos:])
-                elif j == next_doc:
-                    chunk_emissions.extend(emissions[j][:next_pos])
-                    chunk_states.extend(states[j][:next_pos])
-                else:
-                    chunk_emissions.extend(emissions[j])
-                    chunk_states.extend(states[j])
-            self.emissions.append(chunk_emissions)
-            self.states.append(chunk_states)
+        if self.block_size is not None:
+            for i in range(0, num_train_examples * sample_length, self.block_size):
+                cur_doc = i // sample_length
+                cur_pos = i % sample_length
+                next_doc = (i + self.block_size) // sample_length
+                next_pos = (i + self.block_size) % sample_length
+                chunk_emissions, chunk_states = [], []
+                for j in range(cur_doc, next_doc + 1):
+                    if j >= num_train_examples:
+                        continue
+                    if cur_doc == next_doc:
+                        chunk_emissions.extend(emissions[j][cur_pos:next_pos])
+                        chunk_states.extend(states[j][cur_pos:next_pos])
+                    elif j == cur_doc:
+                        chunk_emissions.extend(emissions[j][cur_pos:])
+                        chunk_states.extend(states[j][cur_pos:])
+                    elif j == next_doc:
+                        chunk_emissions.extend(emissions[j][:next_pos])
+                        chunk_states.extend(states[j][:next_pos])
+                    else:
+                        chunk_emissions.extend(emissions[j])
+                        chunk_states.extend(states[j])
+                self.emissions.append(chunk_emissions)
+                self.states.append(chunk_states)
+        else:
+            self.emissions = emissions
+            self.states = states
+            self.hmm = hmm
 
         # length
         self.length = len(self.emissions)
@@ -264,6 +273,7 @@ class HMMDataset(Dataset):
             "input_ids": self.emissions[idx],
             "labels": self.emissions[idx],
             "states": self.states[idx],
+            "hmm": self.hmm[idx] if (len(self.hmm) > 0) else 0,
         }
     
     def make_subsets(self):
