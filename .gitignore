@@ -1,6 +1,4 @@
 __pycache__/
-test/
+logs/
 wandb/
-plots/
-plots_1/
-sus/
+*.out

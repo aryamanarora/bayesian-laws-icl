@@ -7,6 +7,7 @@ from data import HMMDataset, MixtureOfHmms, HMMInContextDataset
 from copy import deepcopy
 import numpy as np
 from collections import defaultdict
+from tqdm import tqdm
 
 import pandas as pd
 from plotnine import ggplot, aes, geom_point, facet_wrap, facet_grid, geom_line, stat_summary, ylim
@@ -31,10 +32,13 @@ class DataArguments:
     num_emissions: int = field(default=50, metadata={"help": "Number of emissions in each HMM."})
     num_train_examples: int = field(default=1000, metadata={"help": "Number of training examples."})
     num_eval_examples: int = field(default=50, metadata={"help": "Number of evaluation examples."})
+    num_sft_examples: int = field(default=None)
     # xie: Optional[bool] = field(default=True, metadata={"help": "Whether to use Xie's HMM."})
     k: int = field(default=3, metadata={"help": "Length of each in-context example."})
     num_in_context_examples: int = field(default=1000, metadata={"help": "Number of in-context examples."})
     num_in_context_shots: int = field(default=64, metadata={"help": "Number of in-context shots."})
+    pretrain_dist: str = field(default="1,1,1,1,1", metadata={"help": "Pretrain distribution."})
+    sft_dist: str = field(default="1,0,0,0,0", metadata={"help": "SFT distribution."})
 
 
 @dataclass
@@ -92,120 +96,178 @@ def in_context_eval(trainer, in_context_dataset, k):
 def train():
     parser = transformers.HfArgumentParser((ModelArguments, DataArguments, TrainingArguments))
     model_args, data_args, training_args = parser.parse_args_into_dataclasses()
+
+    # args
+    if data_args.num_sft_examples is None:
+        data_args.num_sft_examples = max(1, data_args.num_train_examples // 20)
     training_args.data_args = asdict(data_args)
     training_args.model_args = asdict(model_args)
+    training_args.output_dir = f"logs/{training_args.output_dir}"
 
     # wandb setup
     os.environ['WANDB_ENTITY'] = training_args.wandb_entity
     os.environ['WANDB_PROJECT'] = training_args.wandb_project
-
-    # set up model
-    config = transformers.CONFIG_MAPPING[model_args.model_type](
-        vocab_size=data_args.num_emissions,
-        num_hidden_layers=model_args.num_hidden_layers,
-        num_attention_heads=12,
-        num_key_value_heads=12,
-        hidden_size=768,
-        max_position_embeddings=1024,
-    )
-    if model_args.model_type == "llama":
-        config.intermediate_size = 4 * 768
-        config.tie_word_embeddings = True
-    print(config)
-    model = transformers.AutoModelForCausalLM.from_config(config)
-    n_params = sum({p.data_ptr(): p.numel() for p in model.parameters()}.values())
-    print(f"Training new model from scratch - Total size={n_params/(10**6):.2f}M params")
 
     # set up data
     hmms = MixtureOfHmms(
         num_hmms=data_args.num_hmms, num_entities=data_args.num_entities, num_properties=data_args.num_properties,
         vocab_size=data_args.num_emissions,
     )
-    train_dataset = HMMDataset(hmms=hmms, num_train_examples=data_args.num_train_examples, sample_length=10240)
-    eval_dataset = HMMDataset(hmms=hmms, num_train_examples=data_args.num_eval_examples, sample_length=1024)
-    in_context_datasets = {}
-    for k in K:
-        in_context_datasets[k] = HMMInContextDataset(
-            hmms=hmms, num_train_examples=data_args.num_in_context_examples,
-            k=k, num_in_context_shots=data_args.num_in_context_shots
-        )
-        print(f"in_context_datasets[{k}]:", len(in_context_datasets[k]))
-
-    # print(torch.tensor(hmms.score(train_dataset[0]["input_ids"][:20])).softmax(-1))
-    # input()
-
-    # set up trainer
-    trainer = transformers.Trainer(
-        model=model,
-        args=training_args,
-        train_dataset=train_dataset,
-        eval_dataset=eval_dataset,
-    )
-    trainer.train()
-
-    # evaluate
-    trainer.evaluate()
-
-    # # eval
-    # subsets = eval_dataset.make_subsets()
-    results = defaultdict(dict)
-    # for hmm, subset in subsets.items():
-    #     res = trainer.evaluate(eval_dataset=subset, metric_key_prefix=f'eval_{hmm}')
-    #     results[hmm]["base"] = res[f'eval_{hmm}_loss']
-
-    # in-context eval
-    pretrain_in_context = []
-    for k, in_context_dataset in in_context_datasets.items():
-        more = in_context_eval(trainer, in_context_dataset, k)
-        for m in more:
-            m["k"] = k
-        pretrain_in_context.extend(more)
-
-    # sft
-    # old_weights = deepcopy(hmms.weights)
-    hmms.weights = np.zeros(hmms.num_hmms)
-    hmms.weights[0] = 0.5
-    hmms.weights[1] = 0.5
-    sft_dataset = HMMDataset(hmms=hmms, num_train_examples=max(1, data_args.num_train_examples // 20), sample_length=10240)
-
-    # train
-    trainer.train_dataset = sft_dataset
-    trainer.args.num_train_epochs = 1
-    trainer.train()
-
-    # # eval
-    # subsets = eval_dataset.make_subsets()
-    # for hmm, subset in subsets.items():
-    #     res = trainer.evaluate(eval_dataset=subset, metric_key_prefix=f'sft_eval_{hmm}')
-    #     results[hmm]["sft"] = res[f'sft_eval_{hmm}_loss']
+    hmms.weights = np.array([float(x) for x in data_args.pretrain_dist.split(",")])
+    hmms.weights /= hmms.weights.sum()
+    data = []
     
-    # print
-    for hmm in sorted(list(results.keys())):
-        print(f"{hmm}: {results[hmm]['base']:.4f} -> {results[hmm]['sft']:.4f}")
+    if model_args.ideal:
 
-    # in-context eval
-    sft_in_context = []
-    for k, in_context_dataset in in_context_datasets.items():
-        more = in_context_eval(trainer, in_context_dataset, k)
-        for m in more:
-            m["k"] = k
-        sft_in_context.extend(more)
+        # make directory
+        if not os.path.exists(training_args.output_dir):
+            os.makedirs(training_args.output_dir)
+
+        # data
+        in_context_datasets = {}
+        for k in K:
+            in_context_datasets[k] = HMMInContextDataset(
+                hmms=hmms, num_train_examples=data_args.num_in_context_examples // 50,
+                k=k, num_in_context_shots=data_args.num_in_context_shots
+            )
+            print(f"in_context_datasets[{k}]:", len(in_context_datasets[k]))
+
+        # in-context eval
+        for k, in_context_dataset in in_context_datasets.items():
+            subsets = in_context_dataset.make_subsets()
+            for hmm, subset in subsets.items():
+                for sequence in tqdm(subset):
+                    seq = sequence['input_ids']
+                    for i in range(k - 2, len(seq), k + 1):
+                        subseq = seq[0:i + 1]
+                        shots = i // (k + 1)
+                        score = hmms.score(subseq)
+                        data.append({
+                            "shots": shots,
+                            "prob": score[hmm],
+                            "acc": 1 if (np.argmax(score) == hmm) else 0,
+                            "nll": 0,
+                            "hmm": str(hmm),
+                            "sft": False,
+                            "k": k
+                        })
+    
+    else:
+
+        # data
+        train_dataset = HMMDataset(hmms=hmms, num_train_examples=data_args.num_train_examples, sample_length=10240)
+        eval_dataset = HMMDataset(hmms=hmms, num_train_examples=data_args.num_eval_examples, sample_length=1024)
+        in_context_datasets = {}
+        old_weights = deepcopy(hmms.weights)
+        hmms.weights = np.array([1.0 for _ in data_args.pretrain_dist.split(",")])
+        hmms.weights /= hmms.weights.sum()
+        for k in K:
+            in_context_datasets[k] = HMMInContextDataset(
+                hmms=hmms, num_train_examples=data_args.num_in_context_examples,
+                k=k, num_in_context_shots=data_args.num_in_context_shots
+            )
+            print(f"in_context_datasets[{k}]:", len(in_context_datasets[k]))
+        hmms.weights = old_weights
+
+        # set up model
+        config = transformers.CONFIG_MAPPING[model_args.model_type](
+            vocab_size=data_args.num_emissions,
+            num_hidden_layers=model_args.num_hidden_layers,
+            num_attention_heads=12,
+            num_key_value_heads=12,
+            hidden_size=768,
+            max_position_embeddings=1024,
+        )
+        if model_args.model_type == "llama":
+            config.intermediate_size = 4 * 768
+            config.tie_word_embeddings = True
+        print(config)
+        model = transformers.AutoModelForCausalLM.from_config(config)
+        n_params = sum({p.data_ptr(): p.numel() for p in model.parameters()}.values())
+        print(f"Training new model from scratch - Total size={n_params/(10**6):.2f}M params")
+
+        # set up trainer
+        trainer = transformers.Trainer(
+            model=model,
+            args=training_args,
+            train_dataset=train_dataset,
+            eval_dataset=eval_dataset,
+        )
+        trainer.train()
+
+        # evaluate
+        trainer.evaluate()
+
+        # eval
+        subsets = eval_dataset.make_subsets()
+        results = defaultdict(dict)
+        for hmm, subset in subsets.items():
+            res = trainer.evaluate(eval_dataset=subset, metric_key_prefix=f'eval_{hmm}')
+            results[hmm]["base"] = res[f'eval_{hmm}_loss']
+
+        # in-context eval
+        for k, in_context_dataset in in_context_datasets.items():
+            more = in_context_eval(trainer, in_context_dataset, k)
+            for m in more:
+                m["sft"] = False
+                m["k"] = k
+            data.extend(more)
+
+        # SFT
+        if data_args.num_sft_examples != 0:
+            hmms.weights = np.array([float(x) for x in data_args.sft_dist.split(",")])
+            hmms.weights /= hmms.weights.sum()
+            sft_dataset = HMMDataset(hmms=hmms, num_train_examples=data_args.num_sft_examples, sample_length=10240)
+
+            # train SFT
+            class SFTTrainer(transformers.Trainer):
+                def evaluate(self, **kwargs):
+                    for k, in_context_dataset in in_context_datasets.items():
+                        step = self.state.global_step
+                        more = in_context_eval(trainer, in_context_dataset, k)
+                        for m in more:
+                            m["k"] = k
+                            m["sft"] = step
+                        data.extend(more)
+                        
+            sft_trainer = SFTTrainer(
+                model=model,
+                args=deepcopy(training_args),
+                train_dataset=train_dataset,
+                eval_dataset=eval_dataset,
+            )
+            sft_trainer.train_dataset = sft_dataset
+            sft_trainer.args.num_train_epochs = 1
+            sft_trainer.args.warmup_steps = 0
+            sft_trainer.args.warmup_ratio = 0.1
+            sft_trainer.args.set_evaluate(strategy="steps", steps=data_args.num_sft_examples // 5, delay=0)
+            sft_trainer.train()
+
+            # eval
+            subsets = eval_dataset.make_subsets()
+            for hmm, subset in subsets.items():
+                res = trainer.evaluate(eval_dataset=subset, metric_key_prefix=f'eval_sft_{hmm}')
+                results[hmm]["sft"] = res[f'eval_sft_{hmm}_loss']
+            
+            # print
+            for hmm in sorted(list(results.keys())):
+                print(f"{hmm}: {results[hmm]['base']:.4f} -> {results[hmm]['sft']:.4f}")
+
+            # in-context eval
+            for k, in_context_dataset in in_context_datasets.items():
+                more = in_context_eval(trainer, in_context_dataset, k)
+                for m in more:
+                    m["sft"] = True
+                    m["k"] = k
+                data.extend(more)
 
     # plot each
     title = "in_context_probs"
-    in_context_probs = []
-    for d in pretrain_in_context:
-        d["sft"] = False
-        in_context_probs.append(d)
-    for d in sft_in_context:
-        d["sft"] = True
-        in_context_probs.append(d)
-    
-    df = pd.DataFrame(in_context_probs)
+    df = pd.DataFrame(data)
     df = df.groupby(["shots", "k", "hmm", "sft"]).mean().reset_index()
 
     # save df
-    df.to_csv(f"{trainer.args.output_dir}/{title}.csv")
+    df.to_csv(f"{training_args.output_dir}/{title}.csv")
 
     plot = (
         ggplot(df, aes(x="shots", y="acc", color="sft")) +
@@ -213,14 +275,14 @@ def train():
         facet_grid("k~hmm") + ylim(0, 1) +
         stat_summary(geom="line")
     )
-    plot.save(f"{trainer.args.output_dir}/{title}.pdf")
+    plot.save(f"{training_args.output_dir}/{title}.pdf")
     plot = (
         ggplot(df, aes(x="shots", y="prob", color="sft")) +
         # geom_point(alpha=0.1, stroke=0) +
         facet_grid("k~hmm") +
         stat_summary(geom="line")
     )
-    plot.save(f"{trainer.args.output_dir}/{title}_p.pdf")
+    plot.save(f"{training_args.output_dir}/{title}_p.pdf")
     plot = (
         ggplot(df, aes(x="shots", y="nll", color="sft")) +
         # geom_point(alpha=0.1, stroke=0) +
@@ -228,7 +290,7 @@ def train():
         stat_summary(geom="line") +
         scale_y_log10() + scale_x_log10()
     )
-    plot.save(f"{trainer.args.output_dir}/{title}_nll.pdf")
+    plot.save(f"{training_args.output_dir}/{title}_nll.pdf")
     plot = (
         ggplot(df, aes(x="shots", y="acc", color="sft")) +
         # geom_point(alpha=0.1, stroke=0) +
@@ -236,7 +298,15 @@ def train():
         ylim(0, 1) +
         stat_summary(geom="line")
     )
-    plot.save(f"{trainer.args.output_dir}/{title}_all.pdf")
+    plot.save(f"{training_args.output_dir}/{title}_all.pdf")
+
+    # dump trainer state
+    # trainer.save_model()
+    # trainer.state.save_to_json(f"{training_args.output_dir}/trainer_state.json")
+
+    # save training args
+    with open(f"{training_args.output_dir}/training_args.json", "w") as f:
+        f.write(training_args.to_json_string())
 
 
 if __name__ == "__main__":

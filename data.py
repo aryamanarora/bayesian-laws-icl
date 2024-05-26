@@ -147,19 +147,10 @@ class XieHMM:
             hiddens.append(np.random.choice(self.hmm.transmat_.shape[1], p=self.hmm.transmat_[hiddens[-1], :]))
         return hiddens
     
-    
-    # def score(self, emissions: list[int]):
-    #     length = len(emissions)
-    #     scores = np.zeros((length, self.num_hidden_states)) # in log space
-    #     for i in range(self.num_hidden_states):
-    #         scores[0, i] = np.log(self.start_state_probs[i]) + np.log(self.emission_probs[i, emissions[0]])
-    #     for i in range(1, length):
-    #         for j in range(self.num_hidden_states):
-    #             temp = [scores[i - 1, k] + np.log(self.state_transition_probs[k, j]) + np.log(self.emission_probs[j, emissions[i]])
-    #                     for k in range(self.num_hidden_states)]
-    #             scores[i, j] = np.logaddexp.reduce(temp)
-    #     return np.logaddexp.reduce(scores[-1])
 
+    def score(self, emissions: list[int]):
+        return self.hmm.score(np.array(emissions).reshape(-1, 1))
+    
 
 class MixtureOfHmms:
     num_hmms: int
@@ -175,6 +166,7 @@ class MixtureOfHmms:
         self.hmms = []
         self.num_entities = num_entities # value
         self.num_properties = num_properties # slot
+        self.vocab_size = vocab_size
         self.weights = np.ones(num_hmms) / num_hmms
 
         # seed
@@ -212,9 +204,10 @@ class MixtureOfHmms:
         return self.hmms[idx]
     
 
-    # def score(self, emissions: list[int]):
-    #     scores = [np.log(self.weights[i]) + self.hmms[i].score(emissions) for i in range(self.num_hmms)]
-    #     return scores
+    def score(self, emissions: list[int]):
+        scores = [np.log(self.weights[i]) + self.hmms[i].score(emissions) for i in range(self.num_hmms)]
+        return scores
+
     
 
 class HMMDataset(Dataset):
