@@ -42,7 +42,7 @@ def analyse_folder(
         df.loc[:, 'hmm'] = df['hmm'].astype('category') # set hmm column to categorical
 
         # get power law fit
-        print(f"Power law fit for {folder}{suffix}")
+        print(f"Power law fit for {directory}, {suffix}")
         power_law_params = {}
         power_law_params_list = []
         for perc in df['perc'].unique():
@@ -83,7 +83,7 @@ def analyse_folder(
             facet_grid("k~hmm") +
             stat_summary(geom="line")
         )
-        plot.save(f"{directory}/in_context_probs{suffix}.pdf")
+        plot.save(f"{directory}/in_context_probs{suffix}.png")
 
         plot = (
             ggplot(df) +
@@ -92,7 +92,7 @@ def analyse_folder(
             stat_summary(aes(x="shots", y="nll", color="perc"), geom="point", size=1.0, stroke=0, alpha=0.4) +
             scale_y_log10() + scale_x_log10()
         )
-        plot.save(f"{directory}/in_context_probs_nll{suffix}.pdf")
+        plot.save(f"{directory}/in_context_probs_nll{suffix}.png")
 
         power_law_params_df = pd.DataFrame(power_law_params_list)
         power_law_params_df.to_csv(f"{directory}/power_law_params{suffix}.csv", index=False)
@@ -102,7 +102,7 @@ def analyse_folder(
             stat_summary(aes(x="perc", y="alpha", color="hmm", group="hmm"), geom="line") +
             geom_point(aes(x="perc", y="alpha", color="hmm"))
         )
-        plot.save(f"{directory}/power_law_params{suffix}.pdf")
+        plot.save(f"{directory}/power_law_params{suffix}.png")
 
 
 def main():

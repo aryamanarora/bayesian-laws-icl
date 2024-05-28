@@ -2,3 +2,8 @@ __pycache__/
 logs/
 wandb/
 *.out
+count.py
+*.png
+train.json
+train.txt
+figs/

@@ -8,6 +8,7 @@ from copy import deepcopy
 import numpy as np
 from collections import defaultdict
 from tqdm import tqdm
+from typing import List
 
 import pandas as pd
 from plotnine import ggplot, aes, geom_point, facet_wrap, facet_grid, geom_line, stat_summary, ylim
@@ -32,7 +33,7 @@ class DataArguments:
     num_emissions: int = field(default=50, metadata={"help": "Number of emissions in each HMM."})
     num_train_examples: int = field(default=1000, metadata={"help": "Number of training examples."})
     num_eval_examples: int = field(default=50, metadata={"help": "Number of evaluation examples."})
-    num_sft_examples: int = field(default=None)
+    num_sft_examples: int | None = field(default=None)
     # xie: Optional[bool] = field(default=True, metadata={"help": "Whether to use Xie's HMM."})
     k: int = field(default=3, metadata={"help": "Length of each in-context example."})
     num_in_context_examples: int = field(default=1000, metadata={"help": "Number of in-context examples."})
@@ -43,24 +44,24 @@ class DataArguments:
 
 @dataclass
 class TrainingArguments(transformers.TrainingArguments):
-    report_to: str = field(default="wandb", metadata={"help": "Where to report metrics."})
-    logging_steps: int = field(default=10, metadata={"help": "Log every n steps."})
+    report_to: List[str] | None = field(default=["wandb"], metadata={"help": "Where to report metrics."})
+    logging_steps: float = field(default=10, metadata={"help": "Log every n steps."})
     logging_strategy: str = field(default="steps", metadata={"help": "Log every n steps or every n epochs."})
     evaluation_strategy: str = field(default="epoch", metadata={"help": "Evaluate every n steps or every n epochs."})
-    remove_unused_columns: bool = field(default=True)
+    remove_unused_columns: bool | None = field(default=True)
     wandb_project: str = field(default="toy-alignment")
     wandb_entity: str = field(default="aryamanarora")
     per_device_train_batch_size: int = field(default=8)
     per_device_eval_batch_size: int = field(default=8)
     gradient_accumulation_steps: int = field(default=1)
     torch_compile: bool = field(default=True)
-    num_train_epochs: int = field(default=5)
+    num_train_epochs: float = field(default=5.0)
     learning_rate: float = field(default=8e-4)
-    warmup_steps: float = field(default=1000)
+    warmup_steps: int = field(default=1000)
     data_args: dict = field(default_factory=dict)
     model_args: dict = field(default_factory=dict)
     save_strategy: str = field(default="no")
-    
+
 
 def in_context_eval(trainer, in_context_dataset, k):
 
@@ -90,7 +91,7 @@ def in_context_eval(trainer, in_context_dataset, k):
                     "nll": -torch.log(prob[j]).item(),
                     "hmm": str(hmm)
                 })
-    
+
     return in_context_probs
 
 
@@ -117,7 +118,7 @@ def train():
     hmms.weights = np.array([float(x) for x in data_args.pretrain_dist.split(",")])
     hmms.weights /= hmms.weights.sum()
     data = []
-    
+
     if model_args.ideal:
 
         # make directory
@@ -157,7 +158,7 @@ def train():
                             "sft": False,
                             "k": k
                         })
-    
+
     else:
 
         # data
@@ -227,7 +228,7 @@ def train():
 
             # train SFT
             class SFTTrainer(transformers.Trainer):
-                def evaluate(self, **kwargs):
+                def evaluate(self, eval_dataset=None, ignore_keys=None, metric_key_prefix="eval"):
                     for k, in_context_dataset in in_context_datasets.items():
                         step = self.state.global_step
                         more = in_context_eval(trainer, in_context_dataset, k)
@@ -235,7 +236,8 @@ def train():
                             m["k"] = k
                             m["sft"] = step
                         data.extend(more)
-                        
+                    return {}
+
             sft_trainer = SFTTrainer(
                 model=model,
                 args=deepcopy(training_args),
@@ -254,7 +256,7 @@ def train():
             for hmm, subset in subsets.items():
                 res = trainer.evaluate(eval_dataset=subset, metric_key_prefix=f'eval_sft_{hmm}')
                 results[hmm]["sft"] = res[f'eval_sft_{hmm}_loss']
-            
+
             # print
             for hmm in sorted(list(results.keys())):
                 print(f"{hmm}: {results[hmm]['base']:.4f} -> {results[hmm]['sft']:.4f}")
