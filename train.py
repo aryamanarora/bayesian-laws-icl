@@ -3,7 +3,7 @@ import torch
 import transformers
 from dataclasses import dataclass, field, asdict
 from typing import Optional
-from data import HMMDataset, MixtureOfHmms, HMMInContextDataset
+from data import HMMDataset, MixtureOfHmms, HMMInContextDataset, softmax
 from copy import deepcopy
 import numpy as np
 from collections import defaultdict
@@ -69,6 +69,7 @@ def in_context_eval(trainer, in_context_dataset, k):
     # 0  1  2  3 4  5  6  7 8  9  10
     #    ^          ^          ^
     # we eval at ^
+    # start at k - 2, step is k + 1
 
     subsets = in_context_dataset.make_subsets()
     in_context_probs = []
@@ -132,20 +133,25 @@ def train():
             )
             print(f"in_context_datasets[{k}]:", len(in_context_datasets[k]))
 
+        # label smooth
+        hmms_smoothed = hmms.to_label_smoothed(alpha=0.95)
+
         # in-context eval
         for k, in_context_dataset in in_context_datasets.items():
             subsets = in_context_dataset.make_subsets()
             for hmm, subset in subsets.items():
                 for sequence in tqdm(subset):
                     seq = sequence['input_ids']
+                    scores = np.zeros(len(subsets))
                     for i in range(k - 2, len(seq), k + 1):
-                        subseq = seq[0:i + 1]
+                        subseq = seq[i - (k - 2):i + 2]
                         shots = i // (k + 1)
-                        score = hmms.score(subseq)
+                        score = hmms_smoothed.score(subseq)
+                        scores += score
                         data.append({
                             "shots": shots,
-                            "prob": score[hmm],
-                            "acc": 1 if (np.argmax(score) == hmm) else 0,
+                            "prob": softmax(scores)[hmm],
+                            "acc": 1 if (np.argmax(scores) == hmm) else 0,
                             "nll": 0,
                             "hmm": str(hmm),
                             "sft": False,

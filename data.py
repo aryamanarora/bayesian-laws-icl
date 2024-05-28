@@ -131,10 +131,6 @@ class XieHMM:
         self.hmm.transmat_ = transmat
         self.hmm.emissionprob_ = emissionprob
 
-        # plot transmat
-        plt.imshow(transmat)
-        plt.savefig("transmat.png")
-
 
     def sample_from_hmm(self, length: int, seed=None):
         x, h = self.hmm.sample(n_samples=length, random_state=seed)
@@ -205,8 +201,24 @@ class MixtureOfHmms:
     
 
     def score(self, emissions: list[int]):
-        scores = [np.log(self.weights[i]) + self.hmms[i].score(emissions) for i in range(self.num_hmms)]
+        scores = np.array([np.log(self.weights[i]) + self.hmms[i].score(emissions) for i in range(self.num_hmms)])
         return scores
+    
+
+    def to_label_smoothed(self, alpha: float=0.01):
+        # plot transmat
+        plt.imshow(self.hmms[0].hmm.transmat_, vmin=0, vmax=1)
+        plt.savefig("transmat.png")
+
+        smoothed_mixture = deepcopy(self)
+        for hmm in smoothed_mixture.hmms:
+            hmm.hmm.transmat_ = (1 - alpha) * hmm.hmm.transmat_ + alpha / hmm.hmm.transmat_.shape[0]
+
+        # plot transmat
+        plt.imshow(smoothed_mixture.hmms[0].hmm.transmat_, vmin=0, vmax=1)
+        plt.savefig("smoothedtransmat.png")
+
+        return smoothed_mixture
 
     
 
