@@ -220,7 +220,6 @@ class MixtureOfHmms:
 
         return smoothed_mixture
 
-    
 
 class HMMDataset(Dataset):
     def __init__(
