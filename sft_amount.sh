@@ -26,7 +26,7 @@ do
             ;;
     esac
 
-    nlprun -n $PERCENTAGE -g 1 "python train.py --num_hidden_layers $NUM_HIDDEN_LAYERS \
+    nlprun -n $PERCENTAGE-$NUM_HIDDEN_LAYERS -g 1 "python train.py --num_hidden_layers $NUM_HIDDEN_LAYERS \
         --num_train_epochs $NUM_TRAIN_EPOCHS \
         --output_dir $PERCENTAGE-$NUM_HIDDEN_LAYERS \
         --num_train_examples $NUM_TRAIN_EXAMPLES \
