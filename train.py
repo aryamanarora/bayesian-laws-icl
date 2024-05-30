@@ -44,7 +44,7 @@ class DataArguments:
 
 @dataclass
 class TrainingArguments(transformers.TrainingArguments):
-    report_to: List[str] | None = field(default=["wandb"], metadata={"help": "Where to report metrics."})
+    report_to: List[str] | None = field(default="wandb", metadata={"help": "Where to report metrics."})
     logging_steps: float = field(default=10, metadata={"help": "Log every n steps."})
     logging_strategy: str = field(default="steps", metadata={"help": "Log every n steps or every n epochs."})
     evaluation_strategy: str = field(default="epoch", metadata={"help": "Evaluate every n steps or every n epochs."})

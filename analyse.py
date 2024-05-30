@@ -25,7 +25,7 @@ def analyse_folder(
 
     # load data
     all_power_law_params = []
-    for suffix in ['', '-8', '-12']:
+    for suffix in ['', '-4', '-8', '-12']:
         folders = ['1perc', '5perc', '10perc', '20perc', '50perc', '100perc', 'infperc']
         dfs = []
         for folder in folders:
@@ -45,6 +45,8 @@ def analyse_folder(
                 df_base.loc[:, 'perc'] = "0"
                 dfs.append(df_base)
 
+        if len(dfs) == 0:
+            continue
         df = pd.concat(dfs)
 
         # format df

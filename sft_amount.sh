@@ -1,10 +1,37 @@
-PRETRAIN_DIST="1,1,1,1,1"
-SFT_DIST="0,1,0,0,0"
+NUM_HIDDEN_LAYERS=${1:-4}
+if [ $NUM_HIDDEN_LAYERS -gt 10 ]; then
+    MEMORY=30G
+else
+    MEMORY=16G
+fi
 
-nlprun -n 1perc -g 1 "python train.py --output_dir 1perc --num_train_examples 1000 --num_sft_examples 50 --learning_rate 8e-5 --pretrain_dist $PRETRAIN_DIST --sft_dist $SFT_DIST"
-nlprun -n 5perc -g 1 "python train.py --output_dir 5perc --num_train_examples 1000 --num_sft_examples 250 --learning_rate 8e-5 --pretrain_dist $PRETRAIN_DIST --sft_dist $SFT_DIST"
-nlprun -n 10perc -g 1 "python train.py --output_dir 10perc --num_train_examples 1000 --num_sft_examples 500 --learning_rate 8e-5 --pretrain_dist $PRETRAIN_DIST --sft_dist $SFT_DIST"
-nlprun -n 20perc -g 1 "python train.py --output_dir 20perc --num_train_examples 1000 --num_sft_examples 1000 --learning_rate 8e-5 --pretrain_dist $PRETRAIN_DIST --sft_dist $SFT_DIST"
-nlprun -n 50perc -g 1 "python train.py --output_dir 50perc --num_train_examples 1000 --num_sft_examples 2500 --learning_rate 8e-5 --pretrain_dist $PRETRAIN_DIST --sft_dist $SFT_DIST"
-nlprun -n 100perc -g 1 "python train.py --output_dir 100perc --num_train_examples 1000 --num_sft_examples 5000 --learning_rate 8e-5 --pretrain_dist $PRETRAIN_DIST --sft_dist $SFT_DIST"
-nlprun -n infperc -g 1 "python train.py --output_dir infperc --num_train_examples 1000 --num_sft_examples 0 --pretrain_dist $SFT_DIST --learning_rate 8e-5"
+PRETRAIN_DIST="1,1,1,1,1"
+SFT_DIST="1,1,0,0,0"
+PERCENTAGES=("1perc" "5perc" "10perc" "20perc" "50perc" "100perc" "infperc")
+NUM_TRAIN_EXAMPLES=1000
+LEARNING_RATE=8e-5
+NUM_TRAIN_EPOCHS=5
+
+# train with different amounts of SFT examples
+for PERCENTAGE in "${PERCENTAGES[@]}"
+do
+    case $PERCENTAGE in
+        "infperc")
+            NUM_SFT_EXAMPLES=0
+            PRETRAIN_DIST=$SFT_DIST
+            ;;
+        *)
+            NUM_SFT_EXAMPLES=$((NUM_TRAIN_EXAMPLES * ${PERCENTAGE%perc} / 20))
+            PRETRAIN_DIST="1,1,1,1,1"
+            ;;
+    esac
+
+    nlprun -n $PERCENTAGE -g 1 "python train.py --num_hidden_layers $NUM_HIDDEN_LAYERS \
+        --num_train_epochs $NUM_TRAIN_EPOCHS \
+        --output_dir $PERCENTAGE-$NUM_HIDDEN_LAYERS \
+        --num_train_examples $NUM_TRAIN_EXAMPLES \
+        --num_sft_examples $NUM_SFT_EXAMPLES \
+        --learning_rate $LEARNING_RATE \
+        --pretrain_dist $PRETRAIN_DIST \
+        --sft_dist $SFT_DIST" -r $MEMORY
+done
