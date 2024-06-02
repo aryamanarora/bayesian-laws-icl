@@ -8,11 +8,19 @@ import pandas as pd
 import numpy as np
 import argparse
 import os
+import math
 
 
 def power_law_fit(n, C, alpha, K):
     """Power law fit function. Params should be positive."""
     return C * n**(-alpha) + 0
+
+
+def bayesian_fit(n, g0, gamma, beta, K):
+    # return -np.log((C * (gamma - beta)) / (C - (C - 1) * (beta / gamma)**n) + beta)
+    # res = (gamma - beta) / (1 - ((g0 - 1) / g0) * (beta / gamma)**(K * n)) + beta
+    res = (gamma - beta) / (1 + np.exp(-K * (n - g0))) + beta
+    return -np.log(res)
 
 
 def analyse_folder(
@@ -65,23 +73,27 @@ def analyse_folder(
                     subset = df[(df['perc'] == perc) & (df['hmm'] == hmm) & (df['k'] == k)]
 
                     # fit power law
-                    params = [5.0, 0.5, 0.0]
+                    params = [0.5, 0.9, 0.1, 1.0]
                     popt, pcov = curve_fit(
-                        power_law_fit, subset['shots'], subset['nll'],
+                        bayesian_fit, subset['shots'], subset['nll'],
                         p0=params, maxfev=10000,
-                        # bounds=(0, +np.inf)
+                        bounds=([-np.inf, 0, 0, -np.inf], [+np.inf, 1, 1, +np.inf])
                     )
-                    C, alpha, K = popt
-                    # print(f"{perc} -- {k}, {hmm}: C={C}, α={alpha}, K={K}")
+                    g0, gamma, beta, K = popt
+                    # if beta > gamma:
+                    #     gamma, beta = beta, gamma
+                    #     g0 = 1 - g0
+                    print(f"{perc} -- {k}, {hmm}: g0={g0}, gamma={gamma}, beta={beta}, k={K}")
 
                     # store
-                    power_law_params[(perc, k, hmm)] = (C, alpha, K)
+                    power_law_params[(perc, k, hmm)] = (g0, gamma, beta, K)
                     power_law_params_list.append({
                         "perc": perc,
                         "k": k,
                         "hmm": hmm,
-                        "C": C,
-                        "alpha": alpha,
+                        "g0": g0,
+                        "gamma": gamma,
+                        "beta": beta,
                         "K": K
                     })
             #     print()
@@ -89,8 +101,8 @@ def analyse_folder(
 
         # store power law estimates in df
         def estimate_nll(row):
-            C, alpha, K = power_law_params[(row['perc'], row['k'], row['hmm'])]
-            return power_law_fit(row['shots'], C, alpha, K)
+            g0, gamma, beta, K = power_law_params[(row['perc'], row['k'], row['hmm'])]
+            return bayesian_fit(row['shots'], g0, gamma, beta, K)
         df["est_nll"] = df.apply(estimate_nll, axis=1)
 
         # plot
@@ -122,20 +134,36 @@ def analyse_folder(
     power_law_params_df = power_law_params_df.groupby(['perc', 'k', 'hmm', 'layers']).mean().reset_index()
 
     plot = (
-        ggplot(power_law_params_df, aes(x="perc", y="alpha", color="hmm", group="hmm")) +
+        ggplot(power_law_params_df, aes(x="perc", y="g0", color="hmm", group="hmm")) +
         facet_grid("layers~k", labeller="label_both") +
         geom_line() + geom_point() +
         theme(axis_text_x = element_text(angle=-90, hjust=0.5))
     )
-    plot.save(f"{directory}/power_law_alpha.png", dpi=300)
+    plot.save(f"{directory}/power_law_g0.png", dpi=300)
 
     plot = (
-        ggplot(power_law_params_df, aes(x="perc", y="C", color="hmm", group="hmm")) +
+        ggplot(power_law_params_df, aes(x="perc", y="gamma", color="hmm", group="hmm")) +
         facet_grid("layers~k", labeller="label_both") +
-        geom_line() + geom_point() + scale_y_log10() +
+        geom_line() + geom_point() +
         theme(axis_text_x = element_text(angle=-90, hjust=0.5))
     )
-    plot.save(f"{directory}/power_law_C.png", dpi=300)
+    plot.save(f"{directory}/power_law_gamma.png", dpi=300)
+
+    plot = (
+        ggplot(power_law_params_df, aes(x="perc", y="beta", color="hmm", group="hmm")) +
+        facet_grid("layers~k", labeller="label_both") +
+        geom_line() + geom_point() +
+        theme(axis_text_x = element_text(angle=-90, hjust=0.5))
+    )
+    plot.save(f"{directory}/power_law_beta.png", dpi=300)
+
+    plot = (
+        ggplot(power_law_params_df, aes(x="perc", y="K", color="hmm", group="hmm")) +
+        facet_grid("layers~k", labeller="label_both") +
+        geom_line() + geom_point() +
+        theme(axis_text_x = element_text(angle=-90, hjust=0.5))
+    )
+    plot.save(f"{directory}/power_law_K.png", dpi=300)
 
 
 def main():
