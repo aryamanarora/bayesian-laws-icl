@@ -4,6 +4,7 @@ from plotnine import (
 )
 from plotnine.scales import scale_y_log10, scale_x_log10
 from scipy.optimize import curve_fit
+from scipy.stats import binom
 import pandas as pd
 import numpy as np
 import argparse
@@ -21,6 +22,16 @@ def bayesian_fit(n, g0, gamma, beta, K):
     # res = (gamma - beta) / (1 - ((g0 - 1) / g0) * (beta / gamma)**(K * n)) + beta
     res = (gamma - beta) / (1 + np.exp(-K * (n - g0))) + beta
     return -np.log(res)
+
+
+def bernoulli_fit(n, g0, gamma, beta):
+    probs_under_g = np.array([binom.pmf(count_A, n, gamma) for count_A in range(0, n + 1)])
+    probs_under_b = np.array([binom.pmf(count_A, n, beta) for count_A in range(0, n + 1)])
+    p_g_given_seq = (probs_under_g * g0 / (probs_under_g * g0 + probs_under_b * (1 - g0)))
+    p_g_exp = np.sum(p_g_given_seq * probs_under_g)
+    p_b_exp = 1 - p_g_exp
+    p_d = gamma * p_g_exp + beta * p_b_exp
+    return -np.log(p_d)
 
 
 def analyse_folder(
@@ -80,9 +91,6 @@ def analyse_folder(
                         bounds=([-np.inf, 0, 0, -np.inf], [+np.inf, 1, 1, +np.inf])
                     )
                     g0, gamma, beta, K = popt
-                    # if beta > gamma:
-                    #     gamma, beta = beta, gamma
-                    #     g0 = 1 - g0
                     print(f"{perc} -- {k}, {hmm}: g0={g0}, gamma={gamma}, beta={beta}, k={K}")
 
                     # store
