@@ -86,16 +86,19 @@ def test(N, p_g, p_A_given_g, p_A_given_b, plot=False):
 
     # CURVE
     def func(x, g0, gamma, beta):
-        return (gamma - beta) * (g0 / (g0 + beta**x * (1 - g0))) + beta
+        res = (2 * gamma - 1) * (gamma - beta) * (gamma**(2*x) * g0) / ((gamma**x) * g0 + (beta**x)*(1 - g0))
+        res += 2 * gamma * beta - gamma - beta + 1
+        return res
+        # return (gamma - beta) * (gamma**x * g0 / (gamma**x * g0 + beta**x * (1 - g0))) + beta
 
     # fit the curve
     df = pd.DataFrame(data, columns=["n", "p", "method", "metric"])
     df_filtered = df[(df["metric"] == "p(d)") & (df["method"] == "MC")]
     params = [p_g, 0.8, 0.2]
     params, _ = curve_fit(
-        func, df_filtered["n"], df_filtered["p"], p0=params, bounds=([0, 0, 0], [1, 1, 1])
+        func, df_filtered["n"], df_filtered["p"], p0=params, bounds=([0, 0, 0], [np.inf, np.inf, np.inf])
     )
-    print(f"p(A|g)={p_A_given_g:.2f}, p(A|b)={p_A_given_b:.2f}: p(g)={params[0]:.5f}, ratio={params[1]:.5f}")
+    print(f"p(A|g)={p_A_given_g:.2f}, p(A|b)={p_A_given_b:.2f}: p(g)={params[0]:.5f}, gamma={params[1]:.5f}, beta={params[2]:.5f}")
 
     # p_0(d) and p_infty(d)
     start = (p_A_given_g**2 + p_B_given_g**2) * p_g + (p_A_given_g * p_A_given_b + p_B_given_g * p_B_given_b) * p_b

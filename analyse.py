@@ -10,28 +10,98 @@ import numpy as np
 import argparse
 import os
 import math
+import torch
+from tqdm import tqdm
 
 
-def power_law_fit(n, C, alpha, K):
-    """Power law fit function. Params should be positive."""
-    return C * n**(-alpha) + 0
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
-def bayesian_fit(n, g0, gamma, beta, K):
-    # return -np.log((C * (gamma - beta)) / (C - (C - 1) * (beta / gamma)**n) + beta)
-    # res = (gamma - beta) / (1 - ((g0 - 1) / g0) * (beta / gamma)**(K * n)) + beta
-    res = (gamma - beta) / (1 + np.exp(-K * (n - g0))) + beta
-    return -np.log(res)
+class BayesianLawFit(torch.nn.Module):
+    def __init__(self, num_hmms):
+        super(BayesianLawFit, self).__init__()
+        self.num_hmms = num_hmms
+        self.masks = []
+        for i in range(num_hmms):
+            mask = (torch.arange(self.num_hmms) == i).to(DEVICE)
+            self.masks.append(mask)
+        self.priors = torch.nn.Parameter(torch.zeros(num_hmms))
+        self.gammas = torch.nn.Parameter(torch.zeros(num_hmms) + 1)
+        self.betas = torch.nn.Parameter(torch.zeros(num_hmms) - 1)
+        self.K = torch.nn.Parameter(torch.tensor(1.0))
+    
+    def get_prior(self):
+        return torch.nn.functional.softmax(self.priors, dim=0)
+
+    def get_gammas(self):
+        return torch.sigmoid(self.gammas)
+
+    def get_betas(self):
+        return torch.sigmoid(self.betas)
+    
+    def get_K(self):
+        return torch.sigmoid(self.K)
+
+    def forward(self, shots, hmm):
+        priors = self.get_prior().log()
+        gammas = self.get_gammas().log()
+        betas = self.get_betas().log()
+        # print("hmm:", hmm)
+        # print("K:", self.K.item())
+        # print("p(hmm):", priors.exp().tolist())
+        p_under_dist = torch.where(self.masks[hmm], gammas, betas)
+        # print("p(d | hmm):", p_under_dist.exp().tolist())
+        p_seq_under_dist = p_under_dist * (shots * self.get_K())
+        # print("p(D | hmm):", p_seq_under_dist.exp().tolist())
+        posteriors = torch.nn.functional.softmax(priors + p_seq_under_dist, dim=0) # already in log space
+        # print("p(hmm | D):", posteriors.tolist())
+        p_data = (posteriors * p_under_dist.exp()).sum()
+        # print("p(d | D, hmm):", (posteriors * p_under_dist.exp()).tolist())
+        # print("p(d | D):", p_data.item())
+        est_nll = -torch.log(p_data)
+        # print("NLL:", nll, est_nll.item())
+        # input()
+        return est_nll
 
 
-def bernoulli_fit(n, g0, gamma, beta):
-    probs_under_g = np.array([binom.pmf(count_A, n, gamma) for count_A in range(0, n + 1)])
-    probs_under_b = np.array([binom.pmf(count_A, n, beta) for count_A in range(0, n + 1)])
-    p_g_given_seq = (probs_under_g * g0 / (probs_under_g * g0 + probs_under_b * (1 - g0)))
-    p_g_exp = np.sum(p_g_given_seq * probs_under_g)
-    p_b_exp = 1 - p_g_exp
-    p_d = gamma * p_g_exp + beta * p_b_exp
-    return -np.log(p_d)
+def fit_bayesian_law(subset: pd.DataFrame):
+    # prep data
+    subset = subset.sample(frac=1.0)
+    num_hmms = len(subset['hmm'].unique())
+
+    # fit power law
+    model = BayesianLawFit(num_hmms).to(DEVICE)
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-2)
+    iterator = tqdm(range(50))
+    patience = 5
+    history = []
+    for _ in iterator:
+        avg_loss = 0.0
+        for i, row in subset.iterrows():
+            optimizer.zero_grad()
+            est_nll = model(row['shots'], int(row['hmm']))
+            loss = (row['nll'] - est_nll)**2
+            avg_loss += loss.item()
+            loss.backward()
+            optimizer.step()
+
+        # print
+        avg_loss /= len(subset)
+        history.append(avg_loss)
+        result = {
+            "loss": avg_loss,
+            "gamma_0": model.get_gammas()[0].item(),
+            "beta_0": model.get_betas()[0].item(),
+            "K": model.get_K().item(),
+        }
+        result.update({f"p_{i}": p.item() for i, p in enumerate(model.get_prior())})
+        iterator.set_postfix(result)
+
+        # early stopping
+        if len(history) > patience and all([math.isclose(history[-1], x, rel_tol=1e-2) for x in history[-patience:]]):
+            break
+    
+    return model
 
 
 def analyse_folder(
@@ -43,7 +113,7 @@ def analyse_folder(
             os.remove(os.path.join(directory, file))
 
     # load data
-    all_power_law_params = []
+    all_bayesian_law_params = []
     for suffix in ['', '-4', '-8', '-12']:
         folders = ['1perc', '5perc', '10perc', '20perc', '50perc', '100perc', 'infperc']
         dfs = []
@@ -74,43 +144,35 @@ def analyse_folder(
 
         # get power law fit
         print(f"Power law fit for {directory}, {suffix}")
-        power_law_params = {}
-        power_law_params_list = []
+        bayesian_law_params = {}
+        bayesian_law_params_list = []
+
         for perc in df['perc'].unique():
-            # print(perc)
             for k in df['k'].unique():
-                for hmm in df['hmm'].unique():
-                    # get subset for this exp
-                    subset = df[(df['perc'] == perc) & (df['hmm'] == hmm) & (df['k'] == k)]
+                print(f"{perc} SFT -- shot length {k}")
 
-                    # fit power law
-                    params = [0.5, 0.9, 0.1, 1.0]
-                    popt, pcov = curve_fit(
-                        bayesian_fit, subset['shots'], subset['nll'],
-                        p0=params, maxfev=10000,
-                        bounds=([-np.inf, 0, 0, -np.inf], [+np.inf, 1, 1, +np.inf])
-                    )
-                    g0, gamma, beta, K = popt
-                    print(f"{perc} -- {k}, {hmm}: g0={g0}, gamma={gamma}, beta={beta}, k={K}")
+                # fit power law
+                subset = df[(df['perc'] == perc) & (df['k'] == k)]
+                model = fit_bayesian_law(subset)
 
-                    # store
-                    power_law_params[(perc, k, hmm)] = (g0, gamma, beta, K)
-                    power_law_params_list.append({
+                # store
+                bayesian_law_params[(perc, k)] = model
+                for hmm in subset['hmm'].unique():
+                    idx = int(hmm)
+                    bayesian_law_params_list.append({
                         "perc": perc,
                         "k": k,
-                        "hmm": hmm,
-                        "g0": g0,
-                        "gamma": gamma,
-                        "beta": beta,
-                        "K": K
+                        "hmm": idx,
+                        "prior": model.get_prior()[idx].item(),
+                        "gamma": model.get_gammas()[idx].item(),
+                        "beta": model.get_betas()[idx].item(),
+                        "K": model.get_K().item(),
                     })
-            #     print()
-            # print('-------------------')
 
         # store power law estimates in df
         def estimate_nll(row):
-            g0, gamma, beta, K = power_law_params[(row['perc'], row['k'], row['hmm'])]
-            return bayesian_fit(row['shots'], g0, gamma, beta, K)
+            model = bayesian_law_params[(row['perc'], row['k'])]
+            return model(row['shots'], int(row['hmm'])).item()
         df["est_nll"] = df.apply(estimate_nll, axis=1)
 
         # plot
@@ -132,46 +194,23 @@ def analyse_folder(
         )
         plot.save(f"{directory}/in_context_probs_nll{suffix}.png", dpi=300)
 
-        power_law_params_df = pd.DataFrame(power_law_params_list)
-        power_law_params_df.to_csv(f"{directory}/power_law_params{suffix}.csv", index=False)
-        power_law_params_df['layers'] = int(suffix.replace('-', '')) if suffix != '' else 4
-        all_power_law_params.append(power_law_params_df)
+        bayesian_law_params_df = pd.DataFrame(bayesian_law_params_list)
+        bayesian_law_params_df.to_csv(f"{directory}/bayesian_law_params{suffix}.csv", index=False)
+        bayesian_law_params_df['layers'] = int(suffix.replace('-', '')) if suffix != '' else 4
+        all_bayesian_law_params.append(bayesian_law_params_df)
     
     # plot power law params
-    power_law_params_df = pd.concat(all_power_law_params)
-    power_law_params_df = power_law_params_df.groupby(['perc', 'k', 'hmm', 'layers']).mean().reset_index()
+    bayesian_law_params_df = pd.concat(all_bayesian_law_params)
+    bayesian_law_params_df = bayesian_law_params_df.groupby(['perc', 'k', 'hmm', 'layers']).mean().reset_index()
 
-    plot = (
-        ggplot(power_law_params_df, aes(x="perc", y="g0", color="hmm", group="hmm")) +
-        facet_grid("layers~k", labeller="label_both") +
-        geom_line() + geom_point() +
-        theme(axis_text_x = element_text(angle=-90, hjust=0.5))
-    )
-    plot.save(f"{directory}/power_law_g0.png", dpi=300)
-
-    plot = (
-        ggplot(power_law_params_df, aes(x="perc", y="gamma", color="hmm", group="hmm")) +
-        facet_grid("layers~k", labeller="label_both") +
-        geom_line() + geom_point() +
-        theme(axis_text_x = element_text(angle=-90, hjust=0.5))
-    )
-    plot.save(f"{directory}/power_law_gamma.png", dpi=300)
-
-    plot = (
-        ggplot(power_law_params_df, aes(x="perc", y="beta", color="hmm", group="hmm")) +
-        facet_grid("layers~k", labeller="label_both") +
-        geom_line() + geom_point() +
-        theme(axis_text_x = element_text(angle=-90, hjust=0.5))
-    )
-    plot.save(f"{directory}/power_law_beta.png", dpi=300)
-
-    plot = (
-        ggplot(power_law_params_df, aes(x="perc", y="K", color="hmm", group="hmm")) +
-        facet_grid("layers~k", labeller="label_both") +
-        geom_line() + geom_point() +
-        theme(axis_text_x = element_text(angle=-90, hjust=0.5))
-    )
-    plot.save(f"{directory}/power_law_K.png", dpi=300)
+    for variable in ['prior', 'gamma', 'beta', 'K']:
+        plot = (
+            ggplot(bayesian_law_params_df, aes(x="perc", y=variable, color="hmm", group="hmm")) +
+            facet_grid("layers~k", labeller="label_both") +
+            geom_line() + geom_point() +
+            theme(axis_text_x = element_text(angle=-90, hjust=0.5))
+        )
+        plot.save(f"{directory}/bayesian_law_{variable}.png", dpi=300)
 
 
 def main():
