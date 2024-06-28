@@ -1,3 +1,7 @@
+"""
+Replicate the plots from the Xie et al. paper.
+"""
+
 from plotnine import (
     ggplot, aes, geom_line, geom_point, facet_grid, stat_summary,
     theme, element_text

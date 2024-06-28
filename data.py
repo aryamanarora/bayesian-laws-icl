@@ -1,3 +1,8 @@
+"""
+Data generation code, largely based on the code for the GINC dataset from
+Xie et al. (2022, https://arxiv.org/abs/2111.02080).
+"""
+
 import numpy as np
 from tqdm import tqdm
 from torch.utils.data import Dataset

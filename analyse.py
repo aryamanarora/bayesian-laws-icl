@@ -1,3 +1,8 @@
+"""
+Code for fitting Bayesian laws to the ICL behaviour from the
+training/SFT/RLHF experiments.
+"""
+
 from plotnine import (
     ggplot, aes, geom_line, geom_point, facet_grid, stat_summary,
     theme, element_text

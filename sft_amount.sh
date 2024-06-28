@@ -6,7 +6,7 @@ else
 fi
 
 PRETRAIN_DIST="1,1,1,1,1"
-SFT_DIST="1,1,0,0,0"
+SFT_DIST="1,0,0,0,0"
 PERCENTAGES=("1perc" "5perc" "10perc" "20perc" "50perc" "100perc" "infperc")
 NUM_TRAIN_EXAMPLES=1000
 LEARNING_RATE=8e-5

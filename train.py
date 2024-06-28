@@ -1,98 +1,21 @@
+
+import numpy as np
 import os
+import pandas as pd
 import torch
 import transformers
-from dataclasses import dataclass, field, asdict
-from typing import Optional
-from data import HMMDataset, MixtureOfHmms, HMMInContextDataset, softmax
-from copy import deepcopy
-import numpy as np
 from collections import defaultdict
-from tqdm import tqdm
-from typing import List
-
-import pandas as pd
+from copy import deepcopy
+from data import HMMDataset, MixtureOfHmms, HMMInContextDataset, softmax
+from dataclasses import asdict
 from plotnine import ggplot, aes, geom_point, facet_wrap, facet_grid, geom_line, stat_summary, ylim
 from plotnine.scales import scale_y_log10, scale_x_log10
+from tqdm import tqdm
+from trainer import ModelArguments, DataArguments, TrainingArguments, SFTTrainer, in_context_eval
 
 device = "cpu" if not torch.cuda.is_available() else "cuda"
 
 K = [3, 5, 8, 10]
-
-@dataclass
-class ModelArguments:
-    model_type: str = field(default="gpt2", metadata={"help": "Model architecture."})
-    num_hidden_layers: int = field(default=4, metadata={"help": "Number of layers in the transformer."})
-    ideal: bool = field(default=False)
-
-
-@dataclass
-class DataArguments:
-    num_hmms: int = field(default=5, metadata={"help": "Number of HMMs in the mixture."})
-    num_entities: int = field(default=10, metadata={"help": "Number of entities in each HMM."})
-    num_properties: int = field(default=10, metadata={"help": "Number of properties in each HMM."})
-    num_emissions: int = field(default=50, metadata={"help": "Number of emissions in each HMM."})
-    num_train_examples: int = field(default=1000, metadata={"help": "Number of training examples."})
-    num_eval_examples: int = field(default=50, metadata={"help": "Number of evaluation examples."})
-    num_sft_examples: int | None = field(default=None)
-    # xie: Optional[bool] = field(default=True, metadata={"help": "Whether to use Xie's HMM."})
-    k: int = field(default=3, metadata={"help": "Length of each in-context example."})
-    num_in_context_examples: int = field(default=1000, metadata={"help": "Number of in-context examples."})
-    num_in_context_shots: int = field(default=64, metadata={"help": "Number of in-context shots."})
-    pretrain_dist: str = field(default="1,1,1,1,1", metadata={"help": "Pretrain distribution."})
-    sft_dist: str = field(default="1,0,0,0,0", metadata={"help": "SFT distribution."})
-
-
-@dataclass
-class TrainingArguments(transformers.TrainingArguments):
-    report_to: List[str] | None = field(default="wandb", metadata={"help": "Where to report metrics."})
-    logging_steps: float = field(default=10, metadata={"help": "Log every n steps."})
-    logging_strategy: str = field(default="steps", metadata={"help": "Log every n steps or every n epochs."})
-    evaluation_strategy: str = field(default="epoch", metadata={"help": "Evaluate every n steps or every n epochs."})
-    remove_unused_columns: bool | None = field(default=True)
-    wandb_project: str = field(default="toy-alignment")
-    wandb_entity: str = field(default="aryamanarora")
-    per_device_train_batch_size: int = field(default=8)
-    per_device_eval_batch_size: int = field(default=8)
-    gradient_accumulation_steps: int = field(default=1)
-    torch_compile: bool = field(default=True)
-    num_train_epochs: float = field(default=5.0)
-    learning_rate: float = field(default=8e-4)
-    warmup_steps: int = field(default=1000)
-    data_args: dict = field(default_factory=dict)
-    model_args: dict = field(default_factory=dict)
-    save_strategy: str = field(default="no")
-
-
-def in_context_eval(trainer, in_context_dataset, k):
-
-    # what does the data look like? e.g. k = 3
-    # h1 a1 b1 / h2 a2 b2 / h3 a3 b3
-    # 0  1  2  3 4  5  6  7 8  9  10
-    #    ^          ^          ^
-    # we eval at ^
-    # start at k - 2, step is k + 1
-
-    subsets = in_context_dataset.make_subsets()
-    in_context_probs = []
-    for hmm, subset in subsets.items():
-        result = trainer.predict(subset)
-        probs = torch.tensor(result.predictions).softmax(-1) # shape: (bs, seq, num_emissions)
-        for i in range(k - 2, probs.shape[1], k + 1):
-            shots = i // (k + 1)
-            label = result.label_ids[:, i] # shape: (bs,)
-            # get the prob of the correct label for each example
-            prob = probs[torch.arange(probs.shape[0]), i, label]
-            argmax = probs[torch.arange(probs.shape[0]), i].argmax(-1)
-            for j in range(len(prob)):
-                in_context_probs.append({
-                    "shots": shots,
-                    "prob": prob[j].item(),
-                    "acc": 1 if (argmax[j] == label[j]).item() else 0,
-                    "nll": -torch.log(prob[j]).item(),
-                    "hmm": str(hmm)
-                })
-
-    return in_context_probs
 
 
 def train():
@@ -102,6 +25,8 @@ def train():
     # args
     if data_args.num_sft_examples is None:
         data_args.num_sft_examples = max(1, data_args.num_train_examples // 20)
+    else:
+        data_args.num_sft_examples = [int(x) for x in data_args.num_sft_examples.split(",")]
     training_args.data_args = asdict(data_args)
     training_args.model_args = asdict(model_args)
     training_args.output_dir = f"logs/{training_args.output_dir}"
@@ -130,7 +55,7 @@ def train():
         for k in K:
             in_context_datasets[k] = HMMInContextDataset(
                 hmms=hmms, num_train_examples=data_args.num_in_context_examples // 50,
-                k=k, num_in_context_shots=data_args.num_in_context_shots
+                k=k, num_in_context_shots=1024 // (k + 1)
             )
             print(f"in_context_datasets[{k}]:", len(in_context_datasets[k]))
 
@@ -171,7 +96,7 @@ def train():
         for k in K:
             in_context_datasets[k] = HMMInContextDataset(
                 hmms=hmms, num_train_examples=data_args.num_in_context_examples,
-                k=k, num_in_context_shots=data_args.num_in_context_shots
+                k=k, num_in_context_shots=1024 // (k + 1)
             )
             print(f"in_context_datasets[{k}]:", len(in_context_datasets[k]))
         hmms.weights = old_weights
@@ -205,7 +130,7 @@ def train():
         # evaluate
         trainer.evaluate()
 
-        # eval
+        # per-HMM eval
         subsets = eval_dataset.make_subsets()
         results = defaultdict(dict)
         for hmm, subset in subsets.items():
@@ -217,44 +142,50 @@ def train():
             more = in_context_eval(trainer, in_context_dataset, k)
             for m in more:
                 m["sft"] = False
+                m["sft_amount"] = 0
                 m["k"] = k
             data.extend(more)
+        print("Length of data after pretraining:", len(data), data[-1])
 
+        # save model
+        trainer.save_model()
+        trainer.state.save_to_json(f"{training_args.output_dir}/trainer_state.json")
+
+        # delete stuff to save memory
+        del model
+        del trainer
+        
         # SFT
-        if data_args.num_sft_examples != 0:
+        for sft_amount in data_args.num_sft_examples:
+            # make dataset
+            if sft_amount == 0:
+                continue
             hmms.weights = np.array([float(x) for x in data_args.sft_dist.split(",")])
             hmms.weights /= hmms.weights.sum()
-            sft_dataset = HMMDataset(hmms=hmms, num_train_examples=data_args.num_sft_examples, sample_length=10240)
+            sft_dataset = HMMDataset(hmms=hmms, num_train_examples=sft_amount, sample_length=10240)
 
-            # train SFT
-            class SFTTrainer(transformers.Trainer):
-                def evaluate(self, eval_dataset=None, ignore_keys=None, metric_key_prefix="eval"):
-                    for k, in_context_dataset in in_context_datasets.items():
-                        step = self.state.global_step
-                        more = in_context_eval(trainer, in_context_dataset, k)
-                        for m in more:
-                            m["k"] = k
-                            m["sft"] = step
-                        data.extend(more)
-                    return {}
-
+            # load model
+            sft_model = transformers.AutoModelForCausalLM.from_pretrained(training_args.output_dir).to(device)
             sft_trainer = SFTTrainer(
-                model=model,
+                model=sft_model,
                 args=deepcopy(training_args),
-                train_dataset=train_dataset,
-                eval_dataset=eval_dataset,
+                train_dataset=sft_dataset,
+                eval_dataset=in_context_datasets,
             )
+            sft_trainer.sft_amount = sft_amount
             sft_trainer.train_dataset = sft_dataset
             sft_trainer.args.num_train_epochs = 1
             sft_trainer.args.warmup_steps = 0
             sft_trainer.args.warmup_ratio = 0.1
-            sft_trainer.args.set_evaluate(strategy="steps", steps=data_args.num_sft_examples // 5, delay=0)
+            sft_trainer.args.set_evaluate(strategy="steps", steps=sft_amount // 5, delay=0)
             sft_trainer.train()
 
             # eval
+            data.extend(sft_trainer.data)
+            print("Length of data after SFT training:", len(data), data[-1])
             subsets = eval_dataset.make_subsets()
             for hmm, subset in subsets.items():
-                res = trainer.evaluate(eval_dataset=subset, metric_key_prefix=f'eval_sft_{hmm}')
+                res = sft_trainer.evaluate(eval_dataset=subset, metric_key_prefix=f'eval_sft_{hmm}', old=True)
                 results[hmm]["sft"] = res[f'eval_sft_{hmm}_loss']
 
             # print
@@ -263,50 +194,25 @@ def train():
 
             # in-context eval
             for k, in_context_dataset in in_context_datasets.items():
-                more = in_context_eval(trainer, in_context_dataset, k)
+                more = in_context_eval(sft_trainer, in_context_dataset, k)
                 for m in more:
                     m["sft"] = True
                     m["k"] = k
+                    m["sft_amount"] = sft_amount
                 data.extend(more)
+            print("Length of data after SFT eval:", len(data), data[-1])
+            
+            # delete stuff to save memory
+            del sft_model
+            del sft_trainer
 
     # plot each
     title = "in_context_probs"
     df = pd.DataFrame(data)
-    df = df.groupby(["shots", "k", "hmm", "sft"]).mean().reset_index()
+    df = df.groupby(["shots", "k", "hmm", "sft", "sft_amount"]).mean().reset_index()
 
     # save df
     df.to_csv(f"{training_args.output_dir}/{title}.csv")
-
-    plot = (
-        ggplot(df, aes(x="shots", y="acc", color="sft")) +
-        # geom_point(alpha=0.1, stroke=0) +
-        facet_grid("k~hmm") + ylim(0, 1) +
-        stat_summary(geom="line")
-    )
-    plot.save(f"{training_args.output_dir}/{title}.pdf")
-    plot = (
-        ggplot(df, aes(x="shots", y="prob", color="sft")) +
-        # geom_point(alpha=0.1, stroke=0) +
-        facet_grid("k~hmm") +
-        stat_summary(geom="line")
-    )
-    plot.save(f"{training_args.output_dir}/{title}_p.pdf")
-    plot = (
-        ggplot(df, aes(x="shots", y="nll", color="sft")) +
-        # geom_point(alpha=0.1, stroke=0) +
-        facet_grid("k~hmm") +
-        stat_summary(geom="line") +
-        scale_y_log10() + scale_x_log10()
-    )
-    plot.save(f"{training_args.output_dir}/{title}_nll.pdf")
-    plot = (
-        ggplot(df, aes(x="shots", y="acc", color="sft")) +
-        # geom_point(alpha=0.1, stroke=0) +
-        facet_grid("~k") +
-        ylim(0, 1) +
-        stat_summary(geom="line")
-    )
-    plot.save(f"{training_args.output_dir}/{title}_all.pdf")
 
     # dump trainer state
     # trainer.save_model()
