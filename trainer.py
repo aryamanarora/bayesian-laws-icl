@@ -47,6 +47,7 @@ class TrainingArguments(transformers.TrainingArguments):
     model_args: dict = field(default_factory=dict)
     save_strategy: str = field(default="no")
     beta: float = field(default=0.1)
+    sft_method: str = field(default="sft", metadata={"help": "Method to use for SFT/RLHF."})
 
 
 def in_context_eval(trainer: transformers.Trainer, in_context_dataset, k: int):
@@ -107,15 +108,34 @@ class SFTTrainer(transformers.Trainer):
             return {}
 
 
-# class DPOTrainer(transformers.Trainer):
-#     def compute_loss(self, model, inputs, return_outputs=False):
-#         accepted_outputs = model(input_ids=inputs["accepted_input_ids"], labels=inputs["accepted_labels"])
-#         rejected_outputs = model(input_ids=inputs["rejected_input_ids"], labels=inputs["rejected_labels"])
+class DPOTrainer(transformers.Trainer):
+    def compute_loss(self, model, inputs, return_outputs=False):
+        accepted_outputs = model(input_ids=inputs["accepted_input_ids"], labels=inputs["accepted_labels"])
+        rejected_outputs = model(input_ids=inputs["rejected_input_ids"], labels=inputs["rejected_labels"])
 
-#         accepted_loss = accepted_outputs.loss
-#         rejected_loss = rejected_outputs.loss
-#         loss = 
-#         loss = -torch.log(torch.sigmoid(self.args.beta * loss))
-#         if return_outputs:
-#             return loss, outputs
-#         return loss
+        accepted_logprobs = -accepted_outputs.loss # NLL -> logprob
+        rejected_logprobs = -rejected_outputs.loss
+        loss = (accepted_logprobs - inputs["accepted_logprobs"]) - (rejected_logprobs - inputs["rejected_logprobs"])
+        loss = -torch.log(torch.sigmoid(self.args.beta * loss))
+        return loss
+
+    def evaluate(self, eval_dataset=None, ignore_keys=None, metric_key_prefix="eval", old=False):
+        # create data member var if not exists
+        if not hasattr(self, "data"):
+            self.data = []
+        if eval_dataset is None:
+            eval_dataset = self.eval_dataset
+
+        # eval
+        if old:
+            return super().evaluate(eval_dataset, ignore_keys, metric_key_prefix)
+        else:
+            for k, in_context_dataset in eval_dataset.items():
+                step = self.state.global_step
+                more = in_context_eval(self, in_context_dataset, k)
+                for m in more:
+                    m["k"] = k
+                    m["sft"] = step
+                    m["sft_amount"] = self.sft_amount
+                self.data.extend(more)
+            return {}

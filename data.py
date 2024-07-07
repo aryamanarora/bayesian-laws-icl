@@ -361,8 +361,8 @@ class HMMPreferenceDataset(Dataset):
                 self.rejected_states.append(rejected_chunk_states)
                 
                 # calculate logprobs
-                accepted_logprobs = base_model(input_ids=accepted_chunk_emissions, labels=accepted_chunk_emissions)["loss"]
-                rejected_logprobs = base_model(input_ids=rejected_chunk_emissions, labels=rejected_chunk_emissions)["loss"]
+                accepted_logprobs = -base_model(input_ids=accepted_chunk_emissions, labels=accepted_chunk_emissions)["loss"]
+                rejected_logprobs = -base_model(input_ids=rejected_chunk_emissions, labels=rejected_chunk_emissions)["loss"]
                 self.accepted_logprobs.append(accepted_logprobs)
                 self.rejected_logprobs.append(rejected_logprobs)
         else:
@@ -375,8 +375,8 @@ class HMMPreferenceDataset(Dataset):
                 
             # calculate logprobs
             for i in range(len(accepted_emissions)):
-                accepted_logprobs = base_model(input_ids=accepted_emissions[i], labels=accepted_emissions[i])["loss"]
-                rejected_logprobs = base_model(input_ids=rejected_emissions[i], labels=rejected_emissions[i])["loss"]
+                accepted_logprobs = -base_model(input_ids=accepted_emissions[i], labels=accepted_emissions[i])["loss"]
+                rejected_logprobs = -base_model(input_ids=rejected_emissions[i], labels=rejected_emissions[i])["loss"]
                 self.accepted_logprobs.append(accepted_logprobs)
                 self.rejected_logprobs.append(rejected_logprobs)
 
@@ -396,6 +396,8 @@ class HMMPreferenceDataset(Dataset):
             "rejected_states": self.rejected_states[idx],
             "accepted_hmm": self.accepted_hmm[idx] if (len(self.accepted_hmm) > 0) else 0,
             "rejected_hmm": self.rejected_hmm[idx] if (len(self.rejected_hmm) > 0) else 0,
+            "accepted_logprobs": self.accepted_logprobs[idx],
+            "rejected_logprobs": self.rejected_logprobs[idx],
         }
     
     def make_subsets(self):

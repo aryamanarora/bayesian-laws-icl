@@ -6,12 +6,12 @@ import torch
 import transformers
 from collections import defaultdict
 from copy import deepcopy
-from data import HMMDataset, MixtureOfHmms, HMMInContextDataset, softmax
+from data import HMMDataset, MixtureOfHmms, HMMInContextDataset, HMMPreferenceDataset, softmax
 from dataclasses import asdict
 from plotnine import ggplot, aes, geom_point, facet_wrap, facet_grid, geom_line, stat_summary, ylim
 from plotnine.scales import scale_y_log10, scale_x_log10
 from tqdm import tqdm
-from trainer import ModelArguments, DataArguments, TrainingArguments, SFTTrainer, in_context_eval
+from trainer import ModelArguments, DataArguments, TrainingArguments, SFTTrainer, DPOTrainer, in_context_eval
 
 device = "cpu" if not torch.cuda.is_available() else "cuda"
 
@@ -160,56 +160,113 @@ def train():
         del trainer
         
         # SFT
-        for sft_amount in data_args.num_sft_examples:
-            # make dataset
-            if sft_amount == 0:
-                continue
-            hmms.weights = np.array([float(x) for x in data_args.sft_dist.split(",")])
-            hmms.weights /= hmms.weights.sum()
-            sft_dataset = HMMDataset(hmms=hmms, num_train_examples=sft_amount, sample_length=10240)
+        if training_args.sft_method == "sft":
+            for sft_amount in data_args.num_sft_examples:
+                # make dataset
+                if sft_amount == 0:
+                    continue
+                hmms.weights = np.array([float(x) for x in data_args.sft_dist.split(",")])
+                hmms.weights /= hmms.weights.sum()
+                sft_dataset = HMMDataset(hmms=hmms, num_train_examples=sft_amount, sample_length=10240)
 
-            # load model
-            sft_model = transformers.AutoModelForCausalLM.from_pretrained(training_args.output_dir).to(device)
-            sft_trainer = SFTTrainer(
-                model=sft_model,
-                args=deepcopy(training_args),
-                train_dataset=sft_dataset,
-                eval_dataset=in_context_datasets,
-            )
-            sft_trainer.sft_amount = sft_amount
-            sft_trainer.train_dataset = sft_dataset
-            sft_trainer.args.num_train_epochs = 1
-            sft_trainer.args.warmup_steps = 0
-            sft_trainer.args.warmup_ratio = 0.1
-            sft_trainer.args.set_evaluate(strategy="steps", steps=sft_amount // 5, delay=0)
-            sft_trainer.train()
+                # load model
+                sft_model = transformers.AutoModelForCausalLM.from_pretrained(training_args.output_dir).to(device)
+                sft_trainer = SFTTrainer(
+                    model=sft_model,
+                    args=deepcopy(training_args),
+                    train_dataset=sft_dataset,
+                    eval_dataset=in_context_datasets,
+                )
+                sft_trainer.sft_amount = sft_amount
+                sft_trainer.train_dataset = sft_dataset
+                sft_trainer.args.num_train_epochs = 1
+                sft_trainer.args.warmup_steps = 0
+                sft_trainer.args.warmup_ratio = 0.1
+                sft_trainer.args.set_evaluate(strategy="steps", steps=sft_amount // 5, delay=0)
+                sft_trainer.train()
 
-            # eval
-            data.append(group_data(sft_trainer.data))
-            print("Length of data after SFT training:", len(data), data[-1])
-            subsets = eval_dataset.make_subsets()
-            for hmm, subset in subsets.items():
-                res = sft_trainer.evaluate(eval_dataset=subset, metric_key_prefix=f'eval_sft_{hmm}', old=True)
-                results[hmm]["sft"] = res[f'eval_sft_{hmm}_loss']
+                # eval
+                data.append(group_data(sft_trainer.data))
+                print("Length of data after SFT training:", len(data), data[-1])
+                subsets = eval_dataset.make_subsets()
+                for hmm, subset in subsets.items():
+                    res = sft_trainer.evaluate(eval_dataset=subset, metric_key_prefix=f'eval_sft_{hmm}', old=True)
+                    results[hmm]["sft"] = res[f'eval_sft_{hmm}_loss']
 
-            # print
-            for hmm in sorted(list(results.keys())):
-                print(f"{hmm}: {results[hmm]['base']:.4f} -> {results[hmm]['sft']:.4f}")
+                # print
+                for hmm in sorted(list(results.keys())):
+                    print(f"{hmm}: {results[hmm]['base']:.4f} -> {results[hmm]['sft']:.4f}")
 
-            # in-context eval
-            for k, in_context_dataset in in_context_datasets.items():
-                more = in_context_eval(sft_trainer, in_context_dataset, k)
-                for m in more:
-                    m["sft"] = True
-                    m["k"] = k
-                    m["sft_amount"] = sft_amount
-                data.append(group_data(more))
-            print("Length of data after SFT eval:", len(data), data[-1])
-            
-            # delete stuff to save memory
-            del sft_dataset
-            del sft_model
-            del sft_trainer
+                # in-context eval
+                for k, in_context_dataset in in_context_datasets.items():
+                    more = in_context_eval(sft_trainer, in_context_dataset, k)
+                    for m in more:
+                        m["sft"] = True
+                        m["k"] = k
+                        m["sft_amount"] = sft_amount
+                    data.append(group_data(more))
+                print("Length of data after SFT eval:", len(data), data[-1])
+                
+                # delete stuff to save memory
+                del sft_dataset
+                del sft_model
+                del sft_trainer
+        elif training_args.sft_method == "dpo":
+            for sft_amount in data_args.num_sft_examples:
+                # make dataset
+                if sft_amount == 0:
+                    continue
+                accepted_weights = np.array([float(x) for x in data_args.sft_dist.split(",")])
+                accepted_weights /= accepted_weights.sum()
+                rejected_weights = 1 - accepted_weights
+                dpo_model = transformers.AutoModelForCausalLM.from_pretrained(training_args.output_dir).to(device)
+                dpo_dataset = HMMPreferenceDataset(
+                    hmms=hmms, accepted_dist=accepted_weights, rejected_dist=rejected_weights,
+                    base_model=dpo_model, num_train_examples=sft_amount, sample_length=10240
+                )
+
+                # load model
+                dpo_trainer = DPOTrainer(
+                    model=dpo_model,
+                    args=deepcopy(training_args),
+                    train_dataset=dpo_dataset,
+                    eval_dataset=in_context_datasets,
+                )
+                dpo_trainer.sft_amount = sft_amount
+                dpo_trainer.train_dataset = sft_dataset
+                dpo_trainer.args.num_train_epochs = 1
+                dpo_trainer.args.warmup_steps = 0
+                dpo_trainer.args.warmup_ratio = 0.1
+                dpo_trainer.args.set_evaluate(strategy="steps", steps=sft_amount // 5, delay=0)
+                dpo_trainer.train()
+
+                # eval
+                data.append(group_data(dpo_trainer.data))
+                print("Length of data after SFT training:", len(data), data[-1])
+                subsets = eval_dataset.make_subsets()
+                for hmm, subset in subsets.items():
+                    res = dpo_trainer.evaluate(eval_dataset=subset, metric_key_prefix=f'eval_sft_{hmm}', old=True)
+                    results[hmm]["sft"] = res[f'eval_sft_{hmm}_loss']
+
+                # print
+                for hmm in sorted(list(results.keys())):
+                    print(f"{hmm}: {results[hmm]['base']:.4f} -> {results[hmm]['sft']:.4f}")
+
+                # in-context eval
+                for k, in_context_dataset in in_context_datasets.items():
+                    more = in_context_eval(dpo_trainer, in_context_dataset, k)
+                    for m in more:
+                        m["sft"] = True
+                        m["k"] = k
+                        m["sft_amount"] = sft_amount
+                    data.append(group_data(more))
+                print("Length of data after SFT eval:", len(data), data[-1])
+                
+                # delete stuff to save memory
+                del dpo_dataset
+                del dpo_model
+                del dpo_trainer
+
 
     # plot each
     title = "in_context_probs"

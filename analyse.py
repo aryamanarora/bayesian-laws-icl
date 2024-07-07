@@ -140,6 +140,7 @@ def fit_bayesian_law(subset: pd.DataFrame):
     return model
 
 
+
 def analyse_folder(
     pretrain: str="1,1,1,1,1",
     sft: str="1,0,0,0,0",
