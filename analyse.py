@@ -18,6 +18,7 @@ import math
 import torch
 from tqdm import tqdm
 from copy import deepcopy
+from collections import defaultdict
 
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -31,7 +32,9 @@ class PowerLawFit(torch.nn.Module):
         self.K = torch.nn.Parameter(torch.tensor(1.0))
     
     def forward(self, shots):
-        return self.C * (shots).pow(-self.alpha) + self.K
+        if type(shots) == int:
+            shots = torch.tensor([shots], dtype=torch.float32).to(DEVICE)
+        return self.C.exp() * (shots).pow(-self.alpha.exp()) + self.K.exp()
 
 
 class BoundedPowerLawFit(torch.nn.Module):
@@ -43,7 +46,80 @@ class BoundedPowerLawFit(torch.nn.Module):
         self.n_c = torch.nn.Parameter(torch.tensor(1.0))
     
     def forward(self, shots):
-        return self.C * (1 + shots / self.n_c).pow(-self.alpha) + self.K
+        if type(shots) == int:
+            shots = torch.tensor([shots], dtype=torch.float32).to(DEVICE)
+        return self.C.exp() * (1 + shots / self.n_c.exp()).pow(-self.alpha.exp()) + self.K.exp()
+
+
+class LogisticLawFit(torch.nn.Module):
+    def __init__(self):
+        super(LogisticLawFit, self).__init__()
+        self.C = torch.nn.Parameter(torch.tensor(1.0))
+        self.alpha = torch.nn.Parameter(torch.tensor(1.0))
+        self.K = torch.nn.Parameter(torch.tensor(1.0))
+        self.n_c = torch.nn.Parameter(torch.tensor(1.0))
+    
+    def forward(self, shots):
+        if type(shots) == int:
+            shots = torch.tensor([shots], dtype=torch.float32).to(DEVICE)
+        return -(self.C.exp() / (1 + (-self.alpha.exp() * (shots - self.n_c)).exp()) + self.K.exp()).log()
+    
+
+power_law_mapping = {
+    "power": PowerLawFit,
+    "bounded": BoundedPowerLawFit,
+    "logistic": LogisticLawFit,
+}
+
+
+def fit_power_law(subset: pd.DataFrame, type="power"):
+    # prep data
+    subset = subset.sample(frac=1.0)
+    subset['hmm'] = subset['hmm'].astype(int)
+    num_hmms = len(subset['hmm'].unique())
+
+    # fit power law
+    model = power_law_mapping[type]()
+    model.to(DEVICE)
+    iterator = tqdm(range(100))
+    patience = 5
+    batch_size = 5
+    history = []
+
+    optimizer = torch.optim.Adam(model.parameters(), lr=5e-2)
+
+    for _ in iterator:
+        avg_loss = 0.0
+        loss = 0.0
+        for i in range(0, len(subset), batch_size):
+            optimizer.zero_grad()
+            batch = subset.iloc[i:i+batch_size]
+            shots = torch.tensor(batch['shots'].values, dtype=torch.float32).to(DEVICE)
+            true_nll = torch.tensor(batch['nll'].values, dtype=torch.float32).to(DEVICE)
+            est_nll = model(shots)
+            loss = ((true_nll - est_nll)**2).sum()
+            loss.backward()
+            optimizer.step()
+            avg_loss += loss.item()
+
+        # print
+        avg_loss /= len(subset)
+        history.append(avg_loss)
+        result = {
+            "loss": avg_loss,
+            "C": model.C.item(),
+            "alpha": model.alpha.item(),
+            "K": model.K.item(),
+        }
+        if hasattr(model, 'n_c'):
+            result['n_c'] = model.n_c.item()
+        iterator.set_postfix(result)
+
+        # early stopping
+        if len(history) > patience and all([math.isclose(history[-1], x, rel_tol=1e-3) for x in history[-patience:]]):
+            break
+    
+    return model
 
 
 class BayesianLawFit(torch.nn.Module):
@@ -54,7 +130,7 @@ class BayesianLawFit(torch.nn.Module):
         self.priors = torch.nn.Parameter(torch.zeros(num_hmms))
         self.gammas = torch.nn.Parameter(torch.zeros(num_hmms) + 1)
         self.betas = torch.nn.Parameter(torch.zeros(num_hmms) - 1)
-        self.K = torch.nn.Parameter(torch.tensor(1.0))
+        self.K = torch.nn.Parameter(torch.tensor(0.0))
     
     def get_prior(self):
         return torch.nn.functional.softmax(self.priors, dim=0)
@@ -66,7 +142,7 @@ class BayesianLawFit(torch.nn.Module):
         return torch.sigmoid(self.betas)
     
     def get_K(self):
-        return torch.sigmoid(self.K) * 10.0
+        return torch.exp(self.K)
 
     def forward(self, shots, hmm):
         priors = self.get_prior().log()
@@ -99,12 +175,12 @@ def fit_bayesian_law(subset: pd.DataFrame):
     # fit power law
     model = BayesianLawFit(num_hmms)
     model.to(DEVICE)
-    iterator = tqdm(range(50))
+    iterator = tqdm(range(100))
     patience = 5
     batch_size = 20
     history = []
 
-    optimizer = torch.optim.Adam(model.parameters(), lr=1e-2)
+    optimizer = torch.optim.Adam(model.parameters(), lr=5e-2)
 
     for _ in iterator:
         avg_loss = 0.0
@@ -134,7 +210,7 @@ def fit_bayesian_law(subset: pd.DataFrame):
         iterator.set_postfix(result)
 
         # early stopping
-        if len(history) > patience and all([math.isclose(history[-1], x, rel_tol=1e-2) for x in history[-patience:]]):
+        if len(history) > patience and all([math.isclose(history[-1], x, rel_tol=1e-3) for x in history[-patience:]]):
             break
     
     return model
@@ -151,27 +227,29 @@ def analyse_folder(
     for layer in layers.split(","):
         # set up dir
         directory = f"logs/{layer}-{pretrain}-{sft}/"
-        assert os.path.exists(directory), f"Directory {directory} does not exist"
-
-        # load data
-        data = pd.read_csv(f"{directory}/in_context_probs.csv")
-        data['layers'] = int(layer)
-        dfs.append(data)
+        if os.path.exists(f"{directory}/in_context_probs.csv"):
+            # load data
+            data = pd.read_csv(f"{directory}/in_context_probs.csv")
+            data['layers'] = int(layer)
+            dfs.append(data)
+        else:
+            print(f"Directory {directory} does not exist")
 
         # set up inf setting dir
         directory = f"logs/{layer}-{sft}-{sft}/"
-        assert os.path.exists(directory), f"Directory {directory} does not exist"
-
-        # load data
-        data2 = pd.read_csv(f"{directory}/in_context_probs.csv")
-        data2['layers'] = int(layer)
-        sft_dummy = 2 * data['sft'].max()
-        data2['sft'] = sft_dummy
-        data2['sft_amount'] = sft_dummy
+        if os.path.exists(f"{directory}/in_context_probs.csv"):
+            # load data
+            data2 = pd.read_csv(f"{directory}/in_context_probs.csv")
+            data2['layers'] = int(layer)
+            sft_dummy = 2 * data['sft'].max()
+            data2['sft'] = sft_dummy
+            data2['sft_amount'] = sft_dummy
+        else:
+            print(f"Directory {directory} does not exist")
 
     # format df
     df_all = pd.concat(dfs)
-    df_all['shots'] += 1 # add one to shots to avoid log(0)
+    df_all = df_all[df_all['shots'] > 0] # remove 0 shots
     df_all['hmm'] = df_all['hmm'].astype(str)
 
     # directory for plots
@@ -192,6 +270,7 @@ def analyse_folder(
         # get power law fit
         print(f"Power law fit for {layer}-layer model")
         bayesian_law_params = {}
+        other_law_params = defaultdict(dict)
         bayesian_law_params_list = []
 
         # each exp
@@ -199,7 +278,7 @@ def analyse_folder(
             for k in df['k'].unique():
                 print(f"{sft_amount} SFT -- shot length {k}")
 
-                # fit power law
+                # BAYESIAN LAW
                 subset = df[(df['sft_amount'] == sft_amount) & (df['k'] == k)]
                 model = fit_bayesian_law(subset)
 
@@ -216,12 +295,34 @@ def analyse_folder(
                         "beta": model.get_betas()[idx].item(),
                         "K": model.get_K().item(),
                     })
+                
+                # POWER LAWS
+                for hmm in subset['hmm'].unique():
+                    subset_hmm = subset[subset['hmm'] == hmm]
+                    for law in power_law_mapping.keys():
+                        model = fit_power_law(subset_hmm, type=law)
+                        other_law_params[law][(sft_amount, k, int(hmm))] = model
 
-        # store power law estimates in df
+        # store bayesian law estimates in df
         def estimate_nll(row):
             model = bayesian_law_params[(row['sft_amount'], row['k'])]
             return model(row['shots'], int(row['hmm'])).item()
         df["est_nll"] = df.apply(estimate_nll, axis=1)
+        df["mse"] = (df["nll"] - df["est_nll"])**2
+
+        # and power law estimates
+        for law in other_law_params.keys():
+            def estimate_nll(row):
+                model = other_law_params[law][(row['sft_amount'], row['k'], int(row['hmm']))]
+                return model(row['shots']).item()
+            df[f"est_nll_{law}"] = df.apply(estimate_nll, axis=1)
+            df[f"mse_{law}"] = (df["nll"] - df[f"est_nll_{law}"])**2
+
+        # print average MSE for each model
+        print(f"Average MSE for {layer}-layer model")
+        print("Bayesian:", df.groupby(['sft_amount', 'k', 'hmm']).mean()["mse"].mean())
+        for law in other_law_params.keys():
+            print(f"{law}:", df.groupby(['sft_amount', 'k', 'hmm']).mean()[f"mse_{law}"].mean())
 
         # plot
         suffix = f"-{layer}"
