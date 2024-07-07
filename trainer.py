@@ -46,6 +46,7 @@ class TrainingArguments(transformers.TrainingArguments):
     data_args: dict = field(default_factory=dict)
     model_args: dict = field(default_factory=dict)
     save_strategy: str = field(default="no")
+    beta: float = field(default=0.1)
 
 
 def in_context_eval(trainer: transformers.Trainer, in_context_dataset, k: int):
@@ -104,3 +105,17 @@ class SFTTrainer(transformers.Trainer):
                     m["sft_amount"] = self.sft_amount
                 self.data.extend(more)
             return {}
+
+
+# class DPOTrainer(transformers.Trainer):
+#     def compute_loss(self, model, inputs, return_outputs=False):
+#         accepted_outputs = model(input_ids=inputs["accepted_input_ids"], labels=inputs["accepted_labels"])
+#         rejected_outputs = model(input_ids=inputs["rejected_input_ids"], labels=inputs["rejected_labels"])
+
+#         accepted_loss = accepted_outputs.loss
+#         rejected_loss = rejected_outputs.loss
+#         loss = 
+#         loss = -torch.log(torch.sigmoid(self.args.beta * loss))
+#         if return_outputs:
+#             return loss, outputs
+#         return loss

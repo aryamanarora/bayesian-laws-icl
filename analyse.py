@@ -17,19 +17,40 @@ import os
 import math
 import torch
 from tqdm import tqdm
+from copy import deepcopy
 
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+
+class PowerLawFit(torch.nn.Module):
+    def __init__(self):
+        super(PowerLawFit, self).__init__()
+        self.C = torch.nn.Parameter(torch.tensor(1.0))
+        self.alpha = torch.nn.Parameter(torch.tensor(1.0))
+        self.K = torch.nn.Parameter(torch.tensor(1.0))
+    
+    def forward(self, shots):
+        return self.C * (shots).pow(-self.alpha) + self.K
+
+
+class BoundedPowerLawFit(torch.nn.Module):
+    def __init__(self):
+        super(BoundedPowerLawFit, self).__init__()
+        self.C = torch.nn.Parameter(torch.tensor(1.0))
+        self.alpha = torch.nn.Parameter(torch.tensor(1.0))
+        self.K = torch.nn.Parameter(torch.tensor(1.0))
+        self.n_c = torch.nn.Parameter(torch.tensor(1.0))
+    
+    def forward(self, shots):
+        return self.C * (1 + shots / self.n_c).pow(-self.alpha) + self.K
 
 
 class BayesianLawFit(torch.nn.Module):
     def __init__(self, num_hmms):
         super(BayesianLawFit, self).__init__()
         self.num_hmms = num_hmms
-        self.masks = []
-        for i in range(num_hmms):
-            mask = (torch.arange(self.num_hmms) == i).to(DEVICE)
-            self.masks.append(mask)
+        self.masks = torch.eye(num_hmms, dtype=torch.bool).to(DEVICE)
         self.priors = torch.nn.Parameter(torch.zeros(num_hmms))
         self.gammas = torch.nn.Parameter(torch.zeros(num_hmms) + 1)
         self.betas = torch.nn.Parameter(torch.zeros(num_hmms) - 1)
@@ -45,7 +66,7 @@ class BayesianLawFit(torch.nn.Module):
         return torch.sigmoid(self.betas)
     
     def get_K(self):
-        return torch.sigmoid(self.K)
+        return torch.sigmoid(self.K) * 10.0
 
     def forward(self, shots, hmm):
         priors = self.get_prior().log()
@@ -56,11 +77,11 @@ class BayesianLawFit(torch.nn.Module):
         # print("p(hmm):", priors.exp().tolist())
         p_under_dist = torch.where(self.masks[hmm], gammas, betas)
         # print("p(d | hmm):", p_under_dist.exp().tolist())
-        p_seq_under_dist = p_under_dist * (shots * self.get_K())
+        p_seq_under_dist = p_under_dist * (shots * self.get_K()).unsqueeze(-1)
         # print("p(D | hmm):", p_seq_under_dist.exp().tolist())
-        posteriors = torch.nn.functional.softmax(priors + p_seq_under_dist, dim=0) # already in log space
+        posteriors = torch.nn.functional.softmax(priors + p_seq_under_dist, dim=-1) # already in log space
         # print("p(hmm | D):", posteriors.tolist())
-        p_data = (posteriors * p_under_dist.exp()).sum()
+        p_data = (posteriors * p_under_dist.exp()).sum(dim=-1)
         # print("p(d | D, hmm):", (posteriors * p_under_dist.exp()).tolist())
         # print("p(d | D):", p_data.item())
         est_nll = -torch.log(p_data)
@@ -72,23 +93,33 @@ class BayesianLawFit(torch.nn.Module):
 def fit_bayesian_law(subset: pd.DataFrame):
     # prep data
     subset = subset.sample(frac=1.0)
+    subset['hmm'] = subset['hmm'].astype(int)
     num_hmms = len(subset['hmm'].unique())
 
     # fit power law
-    model = BayesianLawFit(num_hmms).to(DEVICE)
-    optimizer = torch.optim.Adam(model.parameters(), lr=1e-2)
+    model = BayesianLawFit(num_hmms)
+    model.to(DEVICE)
     iterator = tqdm(range(50))
     patience = 5
+    batch_size = 20
     history = []
+
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-2)
+
     for _ in iterator:
         avg_loss = 0.0
-        for i, row in subset.iterrows():
+        loss = 0.0
+        for i in range(0, len(subset), batch_size):
             optimizer.zero_grad()
-            est_nll = model(row['shots'], int(row['hmm']))
-            loss = (row['nll'] - est_nll)**2
-            avg_loss += loss.item()
+            batch = subset.iloc[i:i+batch_size]
+            shots = torch.tensor(batch['shots'].values, dtype=torch.float32).to(DEVICE)
+            hmm = torch.tensor(batch['hmm'].values, dtype=torch.int32).to(DEVICE)
+            true_nll = torch.tensor(batch['nll'].values, dtype=torch.float32).to(DEVICE)
+            est_nll = model(shots, hmm)
+            loss = ((true_nll - est_nll)**2).sum()
             loss.backward()
             optimizer.step()
+            avg_loss += loss.item()
 
         # print
         avg_loss /= len(subset)
@@ -110,62 +141,73 @@ def fit_bayesian_law(subset: pd.DataFrame):
 
 
 def analyse_folder(
-    directory="logs/titrate-hmm0/"
+    pretrain: str="1,1,1,1,1",
+    sft: str="1,0,0,0,0",
+    layers: str="4,8,12"
 ):
-    # remove pngs, csvs, and pdfs in directory (non-recursive)
-    for file in os.listdir(directory):
-        if file.endswith(".png") or file.endswith(".csv") or file.endswith(".pdf"):
-            os.remove(os.path.join(directory, file))
-
     # load data
+    dfs = []
+    for layer in layers.split(","):
+        # set up dir
+        directory = f"logs/{layer}-{pretrain}-{sft}/"
+        assert os.path.exists(directory), f"Directory {directory} does not exist"
+
+        # load data
+        data = pd.read_csv(f"{directory}/in_context_probs.csv")
+        data['layers'] = int(layer)
+        dfs.append(data)
+
+        # set up inf setting dir
+        directory = f"logs/{layer}-{sft}-{sft}/"
+        assert os.path.exists(directory), f"Directory {directory} does not exist"
+
+        # load data
+        data2 = pd.read_csv(f"{directory}/in_context_probs.csv")
+        data2['layers'] = int(layer)
+        sft_dummy = 2 * data['sft'].max()
+        data2['sft'] = sft_dummy
+        data2['sft_amount'] = sft_dummy
+
+    # format df
+    df_all = pd.concat(dfs)
+    df_all['shots'] += 1 # add one to shots to avoid log(0)
+    df_all['hmm'] = df_all['hmm'].astype(str)
+
+    # directory for plots
+    directory = f"figs/{pretrain}-{sft}/"
+    if not os.path.exists(directory):
+        os.makedirs(directory)
+    else:
+        for file in os.listdir(directory):
+            os.remove(f"{directory}/{file}")
+
+    # fit power laws
     all_bayesian_law_params = []
-    for suffix in ['', '-4', '-8', '-12']:
-        folders = ['1perc', '5perc', '10perc', '20perc', '50perc', '100perc', 'infperc']
-        dfs = []
-        for folder in folders:
-            file = f"{directory}/{folder}{suffix}/in_context_probs.csv"
-            if not os.path.exists(file):
-                continue
-            df = pd.read_csv(file)
-
-            # add sft data
-            df_sft = df[df["sft"] == "True"] if folder != 'infperc' else df[df["sft"] == False]
-            df_sft['perc'] = str(float(folder.replace('perc', '')) / 100.0)
-            dfs.append(df_sft)
-
-            # and un-sft data
-            if folder != 'infperc':
-                df_base = df[df["sft"] == "False"]
-                df_base.loc[:, 'perc'] = "0"
-                dfs.append(df_base)
-
-        if len(dfs) == 0:
-            continue
-        df = pd.concat(dfs)
-
-        # format df
-        df['shots'] += 1 # add one to shots to avoid log(0)
-        df['hmm'] = df['hmm'].astype(str)
+    for layer in layers.split(","):
+        # get subset
+        layer = int(layer)
+        df = df_all[(df_all['layers'] == layer) & (df_all['sft'] == df_all['sft_amount'])]
 
         # get power law fit
-        print(f"Power law fit for {directory}, {suffix}")
+        print(f"Power law fit for {layer}-layer model")
         bayesian_law_params = {}
         bayesian_law_params_list = []
 
-        for perc in df['perc'].unique():
+        # each exp
+        for sft_amount in df['sft_amount'].unique():
             for k in df['k'].unique():
-                print(f"{perc} SFT -- shot length {k}")
+                print(f"{sft_amount} SFT -- shot length {k}")
 
                 # fit power law
-                subset = df[(df['perc'] == perc) & (df['k'] == k)]
+                subset = df[(df['sft_amount'] == sft_amount) & (df['k'] == k)]
                 model = fit_bayesian_law(subset)
 
                 # store
-                bayesian_law_params[(perc, k)] = model
+                bayesian_law_params[(sft_amount, k)] = model
                 for hmm in subset['hmm'].unique():
                     idx = int(hmm)
                     bayesian_law_params_list.append({
-                        "perc": perc,
+                        "sft_amount": sft_amount,
                         "k": k,
                         "hmm": idx,
                         "prior": model.get_prior()[idx].item(),
@@ -176,15 +218,16 @@ def analyse_folder(
 
         # store power law estimates in df
         def estimate_nll(row):
-            model = bayesian_law_params[(row['perc'], row['k'])]
+            model = bayesian_law_params[(row['sft_amount'], row['k'])]
             return model(row['shots'], int(row['hmm'])).item()
         df["est_nll"] = df.apply(estimate_nll, axis=1)
 
         # plot
+        suffix = f"-{layer}"
         df = df.drop(columns=['sft'])
-        df_summary = df.groupby(['perc', 'k', 'hmm', 'shots']).mean().reset_index()
+        df_summary = df.groupby(['sft_amount', 'k', 'hmm', 'shots']).mean().reset_index()
         plot = (
-            ggplot(df_summary, aes(x='shots', y='prob', color='perc', group='perc')) +
+            ggplot(df_summary, aes(x='shots', y='prob', color='sft_amount', group='sft_amount')) +
             facet_grid("k~hmm", labeller="label_both") +
             geom_line()
         )
@@ -193,8 +236,8 @@ def analyse_folder(
         plot = (
             ggplot(df_summary) +
             facet_grid('k~hmm', labeller='label_both') +
-            geom_line(aes(x='shots', y='est_nll', color='perc', group='perc')) +
-            geom_point(aes(x='shots', y='nll', color='perc'), size=1.0, stroke=0, alpha=0.4) +
+            geom_line(aes(x='shots', y='est_nll', color='sft_amount', group='sft_amount')) +
+            geom_point(aes(x='shots', y='nll', color='sft_amount'), size=1.0, stroke=0, alpha=0.4) +
             scale_y_log10() + scale_x_log10()
         )
         plot.save(f"{directory}/in_context_probs_nll{suffix}.png", dpi=300)
@@ -206,11 +249,11 @@ def analyse_folder(
     
     # plot power law params
     bayesian_law_params_df = pd.concat(all_bayesian_law_params)
-    bayesian_law_params_df = bayesian_law_params_df.groupby(['perc', 'k', 'hmm', 'layers']).mean().reset_index()
+    bayesian_law_params_df = bayesian_law_params_df.groupby(['sft_amount', 'k', 'hmm', 'layers']).mean().reset_index()
 
     for variable in ['prior', 'gamma', 'beta', 'K']:
         plot = (
-            ggplot(bayesian_law_params_df, aes(x="perc", y=variable, color="hmm", group="hmm")) +
+            ggplot(bayesian_law_params_df, aes(x="sft_amount", y=variable, color="hmm", group="hmm")) +
             facet_grid("layers~k", labeller="label_both") +
             geom_line() + geom_point() +
             theme(axis_text_x = element_text(angle=-90, hjust=0.5))
@@ -220,7 +263,9 @@ def analyse_folder(
 
 def main():
     parser = argparse.ArgumentParser(description='Analyse results')
-    parser.add_argument('--directory', type=str, default="logs/titrate-hmm0/", help='Directory to analyse')
+    parser.add_argument('--pretrain', type=str, default="1,1,1,1,1", help='Pretrain amounts')
+    parser.add_argument('--sft', type=str, default="1,0,0,0,0", help='SFT amounts')
+    parser.add_argument('--layers', type=str, default="4,8,12,16", help='Number of layers')
     args = parser.parse_args()
 
     analyse_folder(**vars(args))

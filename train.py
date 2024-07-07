@@ -18,6 +18,10 @@ device = "cpu" if not torch.cuda.is_available() else "cuda"
 K = [3, 5, 8, 10]
 
 
+def group_data(df: list) -> pd.DataFrame:
+    return pd.DataFrame(df).groupby(["shots", "k", "hmm", "sft", "sft_amount"]).mean().reset_index()
+
+
 def train():
     parser = transformers.HfArgumentParser((ModelArguments, DataArguments, TrainingArguments))
     model_args, data_args, training_args = parser.parse_args_into_dataclasses()
@@ -144,7 +148,7 @@ def train():
                 m["sft"] = False
                 m["sft_amount"] = 0
                 m["k"] = k
-            data.extend(more)
+            data.append(group_data(more))
         print("Length of data after pretraining:", len(data), data[-1])
 
         # save model
@@ -181,7 +185,7 @@ def train():
             sft_trainer.train()
 
             # eval
-            data.extend(sft_trainer.data)
+            data.append(group_data(sft_trainer.data))
             print("Length of data after SFT training:", len(data), data[-1])
             subsets = eval_dataset.make_subsets()
             for hmm, subset in subsets.items():
@@ -199,16 +203,19 @@ def train():
                     m["sft"] = True
                     m["k"] = k
                     m["sft_amount"] = sft_amount
-                data.extend(more)
+                data.append(group_data(more))
             print("Length of data after SFT eval:", len(data), data[-1])
             
             # delete stuff to save memory
+            del sft_dataset
             del sft_model
             del sft_trainer
 
     # plot each
     title = "in_context_probs"
-    df = pd.DataFrame(data)
+
+    # concat the dfs in data
+    df = pd.concat(data)
     df = df.groupby(["shots", "k", "hmm", "sft", "sft_amount"]).mean().reset_index()
 
     # save df

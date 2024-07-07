@@ -5,8 +5,13 @@ else
     MEMORY=16G
 fi
 
+TRAINING_OPTS=""
+if [ $NUM_HIDDEN_LAYERS -gt 12 ]; then
+    TRAINING_OPTS="--per_device_train_batch_size 4 --per_device_eval_batch_size 4 --gradient_accumulation_steps 2"
+fi
+
 PRETRAIN_DIST="1,1,1,1,1"
-SFT_DIST="1,0,0,0,0"
+SFT_DIST=${2:-"1,0,0,0,0"}
 PERCENTAGES=("1perc" "5perc" "10perc" "20perc" "50perc" "100perc")
 NUM_TRAIN_EXAMPLES=1000
 LEARNING_RATE=8e-5
@@ -35,7 +40,8 @@ nlprun -n $NUM_HIDDEN_LAYERS-pretrain-sft -g 1 "python train.py --num_hidden_lay
     --num_sft_examples $NUM_SFT_EXAMPLES \
     --learning_rate $LEARNING_RATE \
     --pretrain_dist $PRETRAIN_DIST \
-    --sft_dist $SFT_DIST" -r $MEMORY
+    --sft_dist $SFT_DIST \
+    $TRAINING_OPTS" -r $MEMORY
 
 # train SFT dist separately
 nlprun -n $NUM_HIDDEN_LAYERS-sft-only -g 1 "python train.py --num_hidden_layers $NUM_HIDDEN_LAYERS \
@@ -45,4 +51,5 @@ nlprun -n $NUM_HIDDEN_LAYERS-sft-only -g 1 "python train.py --num_hidden_layers 
     --num_sft_examples 0 \
     --learning_rate $LEARNING_RATE \
     --pretrain_dist $SFT_DIST \
-    --sft_dist $SFT_DIST" -r $MEMORY
+    --sft_dist $SFT_DIST \
+    $TRAINING_OPTS" -r $MEMORY

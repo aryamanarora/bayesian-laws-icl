@@ -293,8 +293,122 @@ class HMMDataset(Dataset):
         return datasets
 
 
+class HMMPreferenceDataset(Dataset):
+    def __init__(
+        self, hmms: MixtureOfHmms, accepted_dist: list[int], rejected_dist: list[int], base_model,
+        num_train_examples: int=10000, sample_length: int=1000, hmm: int=None,
+        block_size: int=1024,
+    ):
+        super(HMMDataset, self).__init__()
+        self.hmms = hmms
+        self.accepted_emissions = []
+        self.accepted_states = []
+        self.accepted_hmm = []
+        self.accepted_logprobs = []
+        self.rejected_emissions = []
+        self.rejected_states = []
+        self.rejected_hmm = []
+        self.rejected_logprobs = []
+        self.block_size = block_size
+
+        # generate data
+        old_weights = hmms.weights
+
+        # generate accepted data
+        hmms.weights = np.array(accepted_dist)
+        accepted_emissions, accepted_states, accepted_hmm = hmms.sample(num_train_examples, sample_length)
+
+        # generate rejected data
+        hmms.weights = np.array(rejected_dist)
+        rejected_emissions, rejected_states, rejected_hmm = hmms.sample(num_train_examples, sample_length)
+        hmm.weights = old_weights
+
+        # concatenate and make `block_size`-sized chunks
+        if self.block_size is not None:
+            for i in range(0, num_train_examples * sample_length, self.block_size):
+                cur_doc = i // sample_length
+                cur_pos = i % sample_length
+                next_doc = (i + self.block_size) // sample_length
+                next_pos = (i + self.block_size) % sample_length
+                accepted_chunk_emissions, accepted_chunk_states = [], []
+                rejected_chunk_emissions, rejected_chunk_states = [], []
+                for j in range(cur_doc, next_doc + 1):
+                    if j >= num_train_examples:
+                        continue
+                    if cur_doc == next_doc:
+                        accepted_chunk_emissions.extend(accepted_emissions[j][cur_pos:next_pos])
+                        accepted_chunk_states.extend(accepted_states[j][cur_pos:next_pos])
+                        rejected_chunk_emissions.extend(rejected_emissions[j][cur_pos:next_pos])
+                        rejected_chunk_states.extend(rejected_states[j][cur_pos:next_pos])
+                    elif j == cur_doc:
+                        accepted_chunk_emissions.extend(accepted_emissions[j][cur_pos:])
+                        accepted_chunk_states.extend(accepted_states[j][cur_pos:])
+                        rejected_chunk_emissions.extend(rejected_emissions[j][cur_pos:])
+                        rejected_chunk_states.extend(rejected_states[j][cur_pos:])
+                    elif j == next_doc:
+                        accepted_chunk_emissions.extend(accepted_emissions[j][:next_pos])
+                        accepted_chunk_states.extend(accepted_states[j][:next_pos])
+                        rejected_chunk_emissions.extend(rejected_emissions[j][:next_pos])
+                        rejected_chunk_states.extend(rejected_states[j][:next_pos])
+                    else:
+                        accepted_chunk_emissions.extend(accepted_emissions[j])
+                        accepted_chunk_states.extend(accepted_states[j])
+                        rejected_chunk_emissions.extend(rejected_emissions[j])
+                        rejected_chunk_states.extend(rejected_states[j])
+                self.accepted_emissions.append(accepted_chunk_emissions)
+                self.accepted_states.append(accepted_chunk_states)
+                self.rejected_emissions.append(rejected_chunk_emissions)
+                self.rejected_states.append(rejected_chunk_states)
+                
+                # calculate logprobs
+                accepted_logprobs = base_model(input_ids=accepted_chunk_emissions, labels=accepted_chunk_emissions)["loss"]
+                rejected_logprobs = base_model(input_ids=rejected_chunk_emissions, labels=rejected_chunk_emissions)["loss"]
+                self.accepted_logprobs.append(accepted_logprobs)
+                self.rejected_logprobs.append(rejected_logprobs)
+        else:
+            self.accepted_emissions = accepted_emissions
+            self.accepted_states = accepted_states
+            self.accepted_hmm = accepted_hmm
+            self.rejected_emissions = rejected_emissions
+            self.rejected_states = rejected_states
+            self.rejected_hmm = rejected_hmm
+                
+            # calculate logprobs
+            for i in range(len(accepted_emissions)):
+                accepted_logprobs = base_model(input_ids=accepted_emissions[i], labels=accepted_emissions[i])["loss"]
+                rejected_logprobs = base_model(input_ids=rejected_emissions[i], labels=rejected_emissions[i])["loss"]
+                self.accepted_logprobs.append(accepted_logprobs)
+                self.rejected_logprobs.append(rejected_logprobs)
+
+        # length
+        self.length = len(self.emissions)
+    
+    def __len__(self):
+        return self.length
+    
+    def __getitem__(self, idx):
+        return {
+            "accepted_input_ids": self.accepted_emissions[idx],
+            "accepted_labels": self.accepted_emissions[idx],
+            "accepted_states": self.accepted_states[idx],
+            "rejected_input_ids": self.rejected_emissions[idx],
+            "rejected_labels": self.rejected_emissions[idx],
+            "rejected_states": self.rejected_states[idx],
+            "accepted_hmm": self.accepted_hmm[idx] if (len(self.accepted_hmm) > 0) else 0,
+            "rejected_hmm": self.rejected_hmm[idx] if (len(self.rejected_hmm) > 0) else 0,
+        }
+    
+    def make_subsets(self):
+        datasets = defaultdict(list)
+        for i in range(self.length):
+            item = self[i]
+            datasets[item["hmm"]].append(item)
+        return datasets
+
+
 class HMMInContextDataset(Dataset):
-    def __init__(self, hmms: MixtureOfHmms, num_train_examples: int=10000, k: int=10, num_in_context_shots: int=64):
+    def __init__(self, hmms: MixtureOfHmms, num_train_examples: int=10000, k: int=10,
+                 num_in_context_shots: int=64):
         super(HMMInContextDataset, self).__init__()
         self.hmms = hmms
         self.length = num_train_examples
