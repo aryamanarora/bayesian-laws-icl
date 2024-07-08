@@ -33,32 +33,47 @@ NUM_SFT_EXAMPLES=${NUM_SFT_EXAMPLES%,}
 # print num_sft_examples
 echo $NUM_SFT_EXAMPLES
 
-# output dir for sft type (if sft_method is not sft)
-SUFFIX=""
-if [ $SFT_METHOD != "sft" ]; then
-    SUFFIX="-$SFT_METHOD"
+if [ $SFT_METHOD == "sft" ] || [ $SFT_METHOD == "sft,dpo" ]; then
+
+    # train with different amounts of SFT examples
+    nlprun -n $NUM_HIDDEN_LAYERS-pretrain-sft -g 1 "python train.py --num_hidden_layers $NUM_HIDDEN_LAYERS \
+        --num_train_epochs $NUM_TRAIN_EPOCHS \
+        --output_dir $NUM_HIDDEN_LAYERS-$PRETRAIN_DIST-$SFT_DIST \
+        --num_train_examples $NUM_TRAIN_EXAMPLES \
+        --num_sft_examples $NUM_SFT_EXAMPLES \
+        --learning_rate $LEARNING_RATE \
+        --pretrain_dist $PRETRAIN_DIST \
+        --sft_dist $SFT_DIST \
+        --sft_method sft \
+        $TRAINING_OPTS" -r $MEMORY
+
+    # train SFT dist separately
+    nlprun -n $NUM_HIDDEN_LAYERS-sft-only -g 1 "python train.py --num_hidden_layers $NUM_HIDDEN_LAYERS \
+        --num_train_epochs $NUM_TRAIN_EPOCHS \
+        --output_dir $NUM_HIDDEN_LAYERS-$SFT_DIST-$SFT_DIST \
+        --num_train_examples $NUM_TRAIN_EXAMPLES \
+        --num_sft_examples 0 \
+        --learning_rate $LEARNING_RATE \
+        --pretrain_dist $SFT_DIST \
+        --sft_dist $SFT_DIST \
+        --sft_method sft \
+        $TRAINING_OPTS" -r $MEMORY
+
 fi
 
-# train with different amounts of SFT examples
-nlprun -n $NUM_HIDDEN_LAYERS-pretrain-sft -g 1 "python train.py --num_hidden_layers $NUM_HIDDEN_LAYERS \
-    --num_train_epochs $NUM_TRAIN_EPOCHS \
-    --output_dir $NUM_HIDDEN_LAYERS-$PRETRAIN_DIST-$SFT_DIST$SFT_METHOD \
-    --num_train_examples $NUM_TRAIN_EXAMPLES \
-    --num_sft_examples $NUM_SFT_EXAMPLES \
-    --learning_rate $LEARNING_RATE \
-    --pretrain_dist $PRETRAIN_DIST \
-    --sft_dist $SFT_DIST \
-    --sft_method $SFT_METHOD \
-    $TRAINING_OPTS" -r $MEMORY
+if [ $SFT_METHOD == "dpo" ] || [ $SFT_METHOD == "sft,dpo" ]; then
 
-# train SFT dist separately
-nlprun -n $NUM_HIDDEN_LAYERS-sft-only -g 1 "python train.py --num_hidden_layers $NUM_HIDDEN_LAYERS \
-    --num_train_epochs $NUM_TRAIN_EPOCHS \
-    --output_dir $NUM_HIDDEN_LAYERS-$SFT_DIST-$SFT_DIST$SFT_METHOD \
-    --num_train_examples $NUM_TRAIN_EXAMPLES \
-    --num_sft_examples 0 \
-    --learning_rate $LEARNING_RATE \
-    --pretrain_dist $SFT_DIST \
-    --sft_dist $SFT_DIST \
-    --sft_method $SFT_METHOD \
-    $TRAINING_OPTS" -r $MEMORY
+    nlprun -n $NUM_HIDDEN_LAYERS-pretrain-dpo -g 1 "python train.py --num_hidden_layers $NUM_HIDDEN_LAYERS \
+        --num_train_epochs $NUM_TRAIN_EPOCHS \
+        --output_dir $NUM_HIDDEN_LAYERS-$PRETRAIN_DIST-$SFT_DIST-dpo \
+        --load_dir logs/$NUM_HIDDEN_LAYERS-$PRETRAIN_DIST-$SFT_DIST \
+        --num_train_examples $NUM_TRAIN_EXAMPLES \
+        --num_sft_examples $NUM_SFT_EXAMPLES \
+        --learning_rate $LEARNING_RATE \
+        --pretrain_dist $PRETRAIN_DIST \
+        --sft_dist $SFT_DIST \
+        --sft_method $SFT_METHOD \
+        --do_pretrain False \
+        $TRAINING_OPTS" -r $MEMORY
+
+fi

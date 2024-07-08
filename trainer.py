@@ -9,6 +9,7 @@ class ModelArguments:
     model_type: str = field(default="gpt2", metadata={"help": "Model architecture."})
     num_hidden_layers: int = field(default=4, metadata={"help": "Number of layers in the transformer."})
     ideal: bool = field(default=False)
+    do_pretrain: bool = field(default=True)
 
 
 @dataclass
@@ -48,6 +49,8 @@ class TrainingArguments(transformers.TrainingArguments):
     save_strategy: str = field(default="no")
     beta: float = field(default=0.1)
     sft_method: str = field(default="sft", metadata={"help": "Method to use for SFT/RLHF."})
+    load_dir: str | None = field(default=None)
+    remove_unused_columns: bool = field(default=False) # for dpo
 
 
 def in_context_eval(trainer: transformers.Trainer, in_context_dataset, k: int):
@@ -110,14 +113,20 @@ class SFTTrainer(transformers.Trainer):
 
 class DPOTrainer(transformers.Trainer):
     def compute_loss(self, model, inputs, return_outputs=False):
-        accepted_outputs = model(input_ids=inputs["accepted_input_ids"], labels=inputs["accepted_labels"])
+        if "rejected_input_ids" not in inputs:
+            inputs = {
+                "input_ids": inputs["input_ids"],
+                "labels": inputs["labels"],
+            }
+            return super().compute_loss(model, inputs, return_outputs)
+        accepted_outputs = model(input_ids=inputs["input_ids"], labels=inputs["labels"])
         rejected_outputs = model(input_ids=inputs["rejected_input_ids"], labels=inputs["rejected_labels"])
 
         accepted_logprobs = -accepted_outputs.loss # NLL -> logprob
         rejected_logprobs = -rejected_outputs.loss
         loss = (accepted_logprobs - inputs["accepted_logprobs"]) - (rejected_logprobs - inputs["rejected_logprobs"])
         loss = -torch.log(torch.sigmoid(self.args.beta * loss))
-        return loss
+        return loss.mean()
 
     def evaluate(self, eval_dataset=None, ignore_keys=None, metric_key_prefix="eval", old=False):
         # create data member var if not exists

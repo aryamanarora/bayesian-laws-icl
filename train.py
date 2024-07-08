@@ -34,6 +34,8 @@ def train():
     training_args.data_args = asdict(data_args)
     training_args.model_args = asdict(model_args)
     training_args.output_dir = f"logs/{training_args.output_dir}"
+    if training_args.load_dir is None:
+        training_args.load_dir = training_args.output_dir
 
     # wandb setup
     os.environ['WANDB_ENTITY'] = training_args.wandb_entity
@@ -89,7 +91,6 @@ def train():
                         })
 
     else:
-
         # data
         train_dataset = HMMDataset(hmms=hmms, num_train_examples=data_args.num_train_examples, sample_length=10240)
         eval_dataset = HMMDataset(hmms=hmms, num_train_examples=data_args.num_eval_examples, sample_length=1024)
@@ -104,60 +105,61 @@ def train():
             )
             print(f"in_context_datasets[{k}]:", len(in_context_datasets[k]))
         hmms.weights = old_weights
-
-        # set up model
-        config = transformers.CONFIG_MAPPING[model_args.model_type](
-            vocab_size=data_args.num_emissions,
-            num_hidden_layers=model_args.num_hidden_layers,
-            num_attention_heads=12,
-            num_key_value_heads=12,
-            hidden_size=768,
-            max_position_embeddings=1024,
-        )
-        if model_args.model_type == "llama":
-            config.intermediate_size = 4 * 768
-            config.tie_word_embeddings = True
-        print(config)
-        model = transformers.AutoModelForCausalLM.from_config(config)
-        n_params = sum({p.data_ptr(): p.numel() for p in model.parameters()}.values())
-        print(f"Training new model from scratch - Total size={n_params/(10**6):.2f}M params")
-
-        # set up trainer
-        trainer = transformers.Trainer(
-            model=model,
-            args=training_args,
-            train_dataset=train_dataset,
-            eval_dataset=eval_dataset,
-        )
-        trainer.train()
-
-        # evaluate
-        trainer.evaluate()
-
-        # per-HMM eval
-        subsets = eval_dataset.make_subsets()
         results = defaultdict(dict)
-        for hmm, subset in subsets.items():
-            res = trainer.evaluate(eval_dataset=subset, metric_key_prefix=f'eval_{hmm}')
-            results[hmm]["base"] = res[f'eval_{hmm}_loss']
+        
+        if model_args.do_pretrain:
+            # set up model
+            config = transformers.CONFIG_MAPPING[model_args.model_type](
+                vocab_size=data_args.num_emissions,
+                num_hidden_layers=model_args.num_hidden_layers,
+                num_attention_heads=12,
+                num_key_value_heads=12,
+                hidden_size=768,
+                max_position_embeddings=1024,
+            )
+            if model_args.model_type == "llama":
+                config.intermediate_size = 4 * 768
+                config.tie_word_embeddings = True
+            print(config)
+            model = transformers.AutoModelForCausalLM.from_config(config)
+            n_params = sum({p.data_ptr(): p.numel() for p in model.parameters()}.values())
+            print(f"Training new model from scratch - Total size={n_params/(10**6):.2f}M params")
 
-        # in-context eval
-        for k, in_context_dataset in in_context_datasets.items():
-            more = in_context_eval(trainer, in_context_dataset, k)
-            for m in more:
-                m["sft"] = False
-                m["sft_amount"] = 0
-                m["k"] = k
-            data.append(group_data(more))
-        print("Length of data after pretraining:", len(data), data[-1])
+            # set up trainer
+            trainer = transformers.Trainer(
+                model=model,
+                args=training_args,
+                train_dataset=train_dataset,
+                eval_dataset=eval_dataset,
+            )
+            trainer.train()
 
-        # save model
-        trainer.save_model()
-        trainer.state.save_to_json(f"{training_args.output_dir}/trainer_state.json")
+            # evaluate
+            trainer.evaluate()
 
-        # delete stuff to save memory
-        del model
-        del trainer
+            # per-HMM eval
+            subsets = eval_dataset.make_subsets()
+            for hmm, subset in subsets.items():
+                res = trainer.evaluate(eval_dataset=subset, metric_key_prefix=f'eval_{hmm}')
+                results[hmm]["base"] = res[f'eval_{hmm}_loss']
+
+            # in-context eval
+            for k, in_context_dataset in in_context_datasets.items():
+                more = in_context_eval(trainer, in_context_dataset, k)
+                for m in more:
+                    m["sft"] = False
+                    m["sft_amount"] = 0
+                    m["k"] = k
+                data.append(group_data(more))
+            print("Length of data after pretraining:", len(data), data[-1])
+
+            # save model
+            trainer.save_model()
+            trainer.state.save_to_json(f"{training_args.output_dir}/trainer_state.json")
+
+            # delete stuff to save memory
+            del model
+            del trainer
         
         # SFT
         if training_args.sft_method == "sft":
@@ -170,7 +172,7 @@ def train():
                 sft_dataset = HMMDataset(hmms=hmms, num_train_examples=sft_amount, sample_length=10240)
 
                 # load model
-                sft_model = transformers.AutoModelForCausalLM.from_pretrained(training_args.output_dir).to(device)
+                sft_model = transformers.AutoModelForCausalLM.from_pretrained(training_args.load_dir).to(device)
                 sft_trainer = SFTTrainer(
                     model=sft_model,
                     args=deepcopy(training_args),
@@ -194,8 +196,9 @@ def train():
                     results[hmm]["sft"] = res[f'eval_sft_{hmm}_loss']
 
                 # print
-                for hmm in sorted(list(results.keys())):
-                    print(f"{hmm}: {results[hmm]['base']:.4f} -> {results[hmm]['sft']:.4f}")
+                if model_args.do_pretrain:
+                    for hmm in sorted(list(results.keys())):
+                        print(f"{hmm}: {results[hmm]['base']:.4f} -> {results[hmm]['sft']:.4f}")
 
                 # in-context eval
                 for k, in_context_dataset in in_context_datasets.items():
@@ -217,12 +220,17 @@ def train():
                 if sft_amount == 0:
                     continue
                 accepted_weights = np.array([float(x) for x in data_args.sft_dist.split(",")])
-                accepted_weights /= accepted_weights.sum()
                 rejected_weights = 1 - accepted_weights
-                dpo_model = transformers.AutoModelForCausalLM.from_pretrained(training_args.output_dir).to(device)
+                accepted_weights /= accepted_weights.sum()
+                rejected_weights /= rejected_weights.sum()
+                dpo_model = transformers.AutoModelForCausalLM.from_pretrained(training_args.load_dir).to(device)
                 dpo_dataset = HMMPreferenceDataset(
                     hmms=hmms, accepted_dist=accepted_weights, rejected_dist=rejected_weights,
                     base_model=dpo_model, num_train_examples=sft_amount, sample_length=10240
+                )
+                dpo_eval_dataset = HMMPreferenceDataset(
+                    hmms=hmms, accepted_dist=accepted_weights, rejected_dist=rejected_weights,
+                    base_model=dpo_model, num_train_examples=50, sample_length=10240
                 )
 
                 # load model
@@ -233,7 +241,7 @@ def train():
                     eval_dataset=in_context_datasets,
                 )
                 dpo_trainer.sft_amount = sft_amount
-                dpo_trainer.train_dataset = sft_dataset
+                dpo_trainer.train_dataset = dpo_dataset
                 dpo_trainer.args.num_train_epochs = 1
                 dpo_trainer.args.warmup_steps = 0
                 dpo_trainer.args.warmup_ratio = 0.1
@@ -249,8 +257,9 @@ def train():
                     results[hmm]["sft"] = res[f'eval_sft_{hmm}_loss']
 
                 # print
-                for hmm in sorted(list(results.keys())):
-                    print(f"{hmm}: {results[hmm]['base']:.4f} -> {results[hmm]['sft']:.4f}")
+                if model_args.do_pretrain:
+                    for hmm in sorted(list(results.keys())):
+                        print(f"{hmm}: {results[hmm]['base']:.4f} -> {results[hmm]['sft']:.4f}")
 
                 # in-context eval
                 for k, in_context_dataset in in_context_datasets.items():
