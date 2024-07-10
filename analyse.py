@@ -31,6 +31,13 @@ class PowerLawFit(torch.nn.Module):
         self.alpha = torch.nn.Parameter(torch.tensor(1.0))
         self.K = torch.nn.Parameter(torch.tensor(1.0))
     
+    def get_params(self):
+        return {
+            "C": self.C.exp().item(),
+            "alpha": self.alpha.exp().item(),
+            "K": self.K.exp().item()
+        }
+    
     def forward(self, shots):
         if type(shots) == int:
             shots = torch.tensor([shots], dtype=torch.float32).to(DEVICE)
@@ -44,6 +51,14 @@ class BoundedPowerLawFit(torch.nn.Module):
         self.alpha = torch.nn.Parameter(torch.tensor(1.0))
         self.K = torch.nn.Parameter(torch.tensor(1.0))
         self.n_c = torch.nn.Parameter(torch.tensor(1.0))
+
+    def get_params(self):
+        return {
+            "C": self.C.exp().item(),
+            "alpha": self.alpha.exp().item(),
+            "K": self.K.exp().item(),
+            "n_c": self.n_c.exp().item()
+        }
     
     def forward(self, shots):
         if type(shots) == int:
@@ -59,6 +74,14 @@ class LogisticLawFit(torch.nn.Module):
         self.K = torch.nn.Parameter(torch.tensor(1.0))
         self.n_c = torch.nn.Parameter(torch.tensor(1.0))
     
+    def get_params(self):
+        return {
+            "C": self.C.exp().item(),
+            "alpha": self.alpha.exp().item(),
+            "K": self.K.exp().item(),
+            "n_c": self.n_c.item()
+        }
+    
     def forward(self, shots):
         if type(shots) == int:
             shots = torch.tensor([shots], dtype=torch.float32).to(DEVICE)
@@ -73,15 +96,10 @@ power_law_mapping = {
 
 
 def fit_power_law(subset: pd.DataFrame, type="power"):
-    # prep data
-    subset = subset.sample(frac=1.0)
-    subset['hmm'] = subset['hmm'].astype(int)
-    num_hmms = len(subset['hmm'].unique())
-
     # fit power law
     model = power_law_mapping[type]()
     model.to(DEVICE)
-    iterator = tqdm(range(100))
+    iterator = tqdm(range(50))
     patience = 5
     batch_size = 5
     history = []
@@ -89,6 +107,7 @@ def fit_power_law(subset: pd.DataFrame, type="power"):
     optimizer = torch.optim.Adam(model.parameters(), lr=5e-2)
 
     for _ in iterator:
+        subset = subset.sample(frac=1.0)
         avg_loss = 0.0
         loss = 0.0
         for i in range(0, len(subset), batch_size):
@@ -144,6 +163,14 @@ class BayesianLawFit(torch.nn.Module):
     def get_K(self):
         return torch.exp(self.K)
 
+    def get_params(self):
+        return {
+            "priors": self.get_prior().tolist(),
+            "gammas": self.get_gammas().tolist(),
+            "betas": self.get_betas().tolist(),
+            "K": self.get_K().item()
+        }
+
     def forward(self, shots, hmm):
         priors = self.get_prior().log()
         gammas = self.get_gammas().log()
@@ -167,13 +194,8 @@ class BayesianLawFit(torch.nn.Module):
 
 
 def fit_bayesian_law(subset: pd.DataFrame):
-    # prep data
-    subset = subset.sample(frac=1.0)
-    subset['hmm'] = subset['hmm'].astype(int)
-    num_hmms = len(subset['hmm'].unique())
-
     # fit power law
-    model = BayesianLawFit(num_hmms)
+    model = BayesianLawFit(len(subset['hmm'].unique()))
     model.to(DEVICE)
     iterator = tqdm(range(100))
     patience = 5
@@ -183,13 +205,14 @@ def fit_bayesian_law(subset: pd.DataFrame):
     optimizer = torch.optim.Adam(model.parameters(), lr=5e-2)
 
     for _ in iterator:
+        subset = subset.sample(frac=1.0)
         avg_loss = 0.0
         loss = 0.0
         for i in range(0, len(subset), batch_size):
             optimizer.zero_grad()
             batch = subset.iloc[i:i+batch_size]
             shots = torch.tensor(batch['shots'].values, dtype=torch.float32).to(DEVICE)
-            hmm = torch.tensor(batch['hmm'].values, dtype=torch.int32).to(DEVICE)
+            hmm = torch.tensor(list(map(int, batch['hmm'].values)), dtype=torch.int32).to(DEVICE)
             true_nll = torch.tensor(batch['nll'].values, dtype=torch.float32).to(DEVICE)
             est_nll = model(shots, hmm)
             loss = ((true_nll - est_nll)**2).sum()
@@ -231,6 +254,18 @@ def analyse_folder(
             # load data
             data = pd.read_csv(f"{directory}/in_context_probs.csv")
             data['layers'] = int(layer)
+            data['method'] = 'sft'
+            dfs.append(data)
+        else:
+            print(f"Directory {directory} does not exist")
+        
+        # dpo
+        directory = f"logs/{layer}-{pretrain}-{sft}-dpo/"
+        if os.path.exists(f"{directory}/in_context_probs.csv"):
+            # load data
+            data = pd.read_csv(f"{directory}/in_context_probs.csv")
+            data['layers'] = int(layer)
+            data['method'] = 'dpo'
             dfs.append(data)
         else:
             print(f"Directory {directory} does not exist")
@@ -242,8 +277,10 @@ def analyse_folder(
             data2 = pd.read_csv(f"{directory}/in_context_probs.csv")
             data2['layers'] = int(layer)
             sft_dummy = 2 * data['sft'].max()
-            data2['sft'] = sft_dummy
-            data2['sft_amount'] = sft_dummy
+            data2['sft'] = 'none'
+            data2['sft_amount'] = 0
+            data2['method'] = 'sft'
+            dfs.append(data2)
         else:
             print(f"Directory {directory} does not exist")
 
@@ -251,6 +288,11 @@ def analyse_folder(
     df_all = pd.concat(dfs)
     df_all = df_all[df_all['shots'] > 0] # remove 0 shots
     df_all['hmm'] = df_all['hmm'].astype(str)
+    # no sft for inf setting
+    order = list(map(str, sorted(df_all['sft_amount'].unique()))) + ['none']
+    df_all['sft_amount'] = df_all.apply(lambda x: 'none' if x['sft'] == 'none' else x['sft_amount'], axis=1)
+    df_all['sft_amount'] = pd.Categorical(df_all['sft_amount'].astype(str), categories=order, ordered=True)
+    df_all['sft'] = df_all['sft'].astype(str)
 
     # directory for plots
     directory = f"figs/{pretrain}-{sft}/"
@@ -261,106 +303,140 @@ def analyse_folder(
             os.remove(f"{directory}/{file}")
 
     # fit power laws
-    all_bayesian_law_params = []
-    for layer in layers.split(","):
-        # get subset
-        layer = int(layer)
-        df = df_all[(df_all['layers'] == layer) & (df_all['sft'] == df_all['sft_amount'])]
+    params_dfs = []
+    for method in sorted(list(df_all['method'].unique())):
+        for layer in layers.split(","):
+            # get subset
+            layer = int(layer)
+            df = df_all[
+                (df_all['layers'] == layer) &
+                (df_all['sft_amount'] == df_all['sft']) &
+                (df_all['method'] == method)
+            ]
+            if len(df) == 0:
+                continue
 
-        # get power law fit
-        print(f"Power law fit for {layer}-layer model")
-        bayesian_law_params = {}
-        other_law_params = defaultdict(dict)
-        bayesian_law_params_list = []
+            # get power law fit
+            print(f"Power law fit for {layer}-layer model, {method} method")
+            all_params = defaultdict(dict)
+            all_params_list = []
 
-        # each exp
-        for sft_amount in df['sft_amount'].unique():
-            for k in df['k'].unique():
-                print(f"{sft_amount} SFT -- shot length {k}")
+            # each exp
+            for sft_amount in df['sft_amount'].unique():
+                for k in df['k'].unique():
+                    print(f"{sft_amount} SFT -- shot length {k}")
+                    subset = df[(df['sft_amount'] == sft_amount) & (df['k'] == k)]
 
-                # BAYESIAN LAW
-                subset = df[(df['sft_amount'] == sft_amount) & (df['k'] == k)]
-                model = fit_bayesian_law(subset)
+                    # BAYESIAN LAW
+                    model = fit_bayesian_law(subset)
+                    all_params['bayesian'][(sft_amount, k)] = model
+                    for hmm in subset['hmm'].unique():
+                        idx = int(hmm)
+                        # collect params and store for plotting
+                        params = {
+                            "sft_amount": sft_amount,
+                            "k": k,
+                            "hmm": hmm,
+                            "law": "bayesian",
+                        }
+                        params.update(model.get_params())
+                        for key in params:
+                            if isinstance(params[key], list) or isinstance(params[key], torch.Tensor):
+                                params[key] = params[key][int(hmm)]
+                        all_params_list.append(params)
+                    
+                    # POWER LAWS
+                    for hmm in subset['hmm'].unique():
+                        subset_hmm = subset[subset['hmm'] == hmm]
+                        for law in power_law_mapping.keys():
+                            model = fit_power_law(subset_hmm, type=law)
+                            all_params[law][(sft_amount, k, int(hmm))] = model
 
-                # store
-                bayesian_law_params[(sft_amount, k)] = model
-                for hmm in subset['hmm'].unique():
-                    idx = int(hmm)
-                    bayesian_law_params_list.append({
-                        "sft_amount": sft_amount,
-                        "k": k,
-                        "hmm": idx,
-                        "prior": model.get_prior()[idx].item(),
-                        "gamma": model.get_gammas()[idx].item(),
-                        "beta": model.get_betas()[idx].item(),
-                        "K": model.get_K().item(),
-                    })
-                
-                # POWER LAWS
-                for hmm in subset['hmm'].unique():
-                    subset_hmm = subset[subset['hmm'] == hmm]
-                    for law in power_law_mapping.keys():
-                        model = fit_power_law(subset_hmm, type=law)
-                        other_law_params[law][(sft_amount, k, int(hmm))] = model
+                            # collect params and store for plotting
+                            params = {
+                                "sft_amount": sft_amount,
+                                "k": k,
+                                "hmm": hmm,
+                                "law": law,
+                            }
+                            params.update(model.get_params())
+                            all_params_list.append(params)
+                            
 
-        # store bayesian law estimates in df
-        def estimate_nll(row):
-            model = bayesian_law_params[(row['sft_amount'], row['k'])]
-            return model(row['shots'], int(row['hmm'])).item()
-        df["est_nll"] = df.apply(estimate_nll, axis=1)
-        df["mse"] = (df["nll"] - df["est_nll"])**2
-
-        # and power law estimates
-        for law in other_law_params.keys():
+            # store bayesian law estimates in df
             def estimate_nll(row):
-                model = other_law_params[law][(row['sft_amount'], row['k'], int(row['hmm']))]
-                return model(row['shots']).item()
-            df[f"est_nll_{law}"] = df.apply(estimate_nll, axis=1)
-            df[f"mse_{law}"] = (df["nll"] - df[f"est_nll_{law}"])**2
+                model = all_params['bayesian'][(row['sft_amount'], row['k'])]
+                return model(row['shots'], int(row['hmm'])).item()
+            df.loc[:, "est_nll_bayesian"] = df.apply(estimate_nll, axis=1)
+            df.loc[:, "mse_bayesian"] = (df["nll"] - df["est_nll_bayesian"])**2
 
-        # print average MSE for each model
-        print(f"Average MSE for {layer}-layer model")
-        print("Bayesian:", df.groupby(['sft_amount', 'k', 'hmm']).mean()["mse"].mean())
-        for law in other_law_params.keys():
-            print(f"{law}:", df.groupby(['sft_amount', 'k', 'hmm']).mean()[f"mse_{law}"].mean())
+            # and power law estimates
+            for law in power_law_mapping.keys():
+                def estimate_nll(row):
+                    model = all_params[law][(row['sft_amount'], row['k'], int(row['hmm']))]
+                    return model(row['shots']).item()
+                df[f"est_nll_{law}"] = df.apply(estimate_nll, axis=1)
+                df[f"mse_{law}"] = (df["nll"] - df[f"est_nll_{law}"])**2
 
-        # plot
-        suffix = f"-{layer}"
-        df = df.drop(columns=['sft'])
-        df_summary = df.groupby(['sft_amount', 'k', 'hmm', 'shots']).mean().reset_index()
-        plot = (
-            ggplot(df_summary, aes(x='shots', y='prob', color='sft_amount', group='sft_amount')) +
-            facet_grid("k~hmm", labeller="label_both") +
-            geom_line()
-        )
-        plot.save(f"{directory}/in_context_probs{suffix}.png", dpi=300)
+            # print average MSE for each model
+            print(f"Average MSE for {layer}-layer model, {method} method")
+            for law in list(power_law_mapping.keys()) + ['bayesian']:
+                print(f"{law}:", df.groupby(['sft_amount', 'k', 'hmm', 'method', 'sft'], observed=True).mean()[f"mse_{law}"].mean())
+            
+            # store mses in params list
+            for i in range(len(all_params_list)):
+                row = all_params_list[i]
+                mse = df[
+                    (df['sft_amount'] == row['sft_amount']) &
+                    (df['k'] == row['k']) &
+                    (df['hmm'] == row['hmm'])
+                ][f'mse_{row["law"]}'].mean()
+                all_params_list[i]['mse'] = mse
 
-        plot = (
-            ggplot(df_summary) +
-            facet_grid('k~hmm', labeller='label_both') +
-            geom_line(aes(x='shots', y='est_nll', color='sft_amount', group='sft_amount')) +
-            geom_point(aes(x='shots', y='nll', color='sft_amount'), size=1.0, stroke=0, alpha=0.4) +
-            scale_y_log10() + scale_x_log10()
-        )
-        plot.save(f"{directory}/in_context_probs_nll{suffix}.png", dpi=300)
+            # plot
+            suffix = f"-{layer}-{method}"
+            df = df.drop(columns=['sft'])
+            df_summary = df.groupby(['sft_amount', 'k', 'hmm', 'shots', 'method'], observed=True).mean().reset_index()
+            plot = (
+                ggplot(df_summary, aes(x='shots', y='prob', color='sft_amount', group='sft_amount')) +
+                facet_grid("k~hmm", labeller="label_both") +
+                geom_line()
+            )
+            plot.save(f"{directory}/in_context_probs{suffix}.png", dpi=300)
 
-        bayesian_law_params_df = pd.DataFrame(bayesian_law_params_list)
-        bayesian_law_params_df.to_csv(f"{directory}/bayesian_law_params{suffix}.csv", index=False)
-        bayesian_law_params_df['layers'] = int(suffix.replace('-', '')) if suffix != '' else 4
-        all_bayesian_law_params.append(bayesian_law_params_df)
+            plot = (
+                ggplot(df_summary) +
+                facet_grid('k~hmm', labeller='label_both') +
+                geom_line(aes(x='shots', y='est_nll_bayesian', color='sft_amount', group='sft_amount')) +
+                geom_point(aes(x='shots', y='nll', color='sft_amount'), size=1.0, stroke=0, alpha=0.4) +
+                scale_y_log10() + scale_x_log10()
+            )
+            plot.save(f"{directory}/in_context_probs_nll{suffix}.png", dpi=300)
+
+            all_law_params_df = pd.DataFrame(all_params_list)
+            all_law_params_df.to_csv(f"{directory}/all_law_params{suffix}.csv", index=False)
+            all_law_params_df['layers'] = layer
+            all_law_params_df['method'] = method
+            params_dfs.append(all_law_params_df)
     
     # plot power law params
-    bayesian_law_params_df = pd.concat(all_bayesian_law_params)
-    bayesian_law_params_df = bayesian_law_params_df.groupby(['sft_amount', 'k', 'hmm', 'layers']).mean().reset_index()
+    all_law_params_df = pd.concat(params_dfs)
+    all_law_params_df = all_law_params_df.groupby(['sft_amount', 'k', 'hmm', 'layers', 'method', 'law']).mean().reset_index()
 
-    for variable in ['prior', 'gamma', 'beta', 'K']:
-        plot = (
-            ggplot(bayesian_law_params_df, aes(x="sft_amount", y=variable, color="hmm", group="hmm")) +
-            facet_grid("layers~k", labeller="label_both") +
-            geom_line() + geom_point() +
-            theme(axis_text_x = element_text(angle=-90, hjust=0.5))
-        )
-        plot.save(f"{directory}/bayesian_law_{variable}.png", dpi=300)
+    for method in all_law_params_df['method'].unique():
+        all_law_params_df_cur = all_law_params_df[all_law_params_df['method'] == method]
+        for law in all_law_params_df_cur['law'].unique():
+            cur_law_params_df = all_law_params_df_cur[all_law_params_df_cur['law'] == law].dropna()
+            for variable in cur_law_params_df.columns:
+                if variable in ['sft_amount', 'k', 'hmm', 'layers', 'method']:
+                    continue
+                plot = (
+                    ggplot(cur_law_params_df, aes(x="sft_amount", y=variable, color="hmm", group="hmm")) +
+                    facet_grid("layers~k", labeller="label_both") +
+                    geom_line() + geom_point() +
+                    theme(axis_text_x = element_text(angle=-90, hjust=0.5))
+                )
+                plot.save(f"{directory}/{law}_{method}_{variable}.png", dpi=300)
 
 
 def main():
