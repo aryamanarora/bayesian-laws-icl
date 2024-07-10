@@ -301,9 +301,10 @@ class HMMPreferenceDataset(Dataset):
     def __init__(
         self, hmms: MixtureOfHmms, accepted_dist: list[int], rejected_dist: list[int], base_model,
         num_train_examples: int=10000, sample_length: int=1000, hmm: int=None,
-        block_size: int=1024,
+        block_size: int=1024, keep_states=False,
     ):
         super(HMMPreferenceDataset, self).__init__()
+        self.keep_states = keep_states
         self.hmms = hmms
         self.accepted_emissions = []
         self.accepted_states = []
@@ -365,9 +366,10 @@ class HMMPreferenceDataset(Dataset):
                             rejected_chunk_emissions.extend(rejected_emissions[j])
                             rejected_chunk_states.extend(rejected_states[j])
                     self.accepted_emissions.append(accepted_chunk_emissions)
-                    self.accepted_states.append(accepted_chunk_states)
                     self.rejected_emissions.append(rejected_chunk_emissions)
-                    self.rejected_states.append(rejected_chunk_states)
+                    if keep_states:
+                        self.accepted_states.append(accepted_chunk_states)
+                        self.rejected_states.append(rejected_chunk_states)
                     
                     # calculate logprobs
                     accepted_input_ids = torch.tensor(accepted_chunk_emissions).to(DEVICE)
@@ -396,23 +398,29 @@ class HMMPreferenceDataset(Dataset):
             # length
             assert len(self.accepted_emissions) == len(self.rejected_emissions), "Lengths of accepted and rejected data do not match"
             self.length = len(self.accepted_emissions)
+        
+        if not keep_states:
+            self.accepted_states = []
+            self.rejected_states = []
     
     def __len__(self):
         return self.length
     
     def __getitem__(self, idx):
-        return {
+        ret = {
             "input_ids": self.accepted_emissions[idx],
             "labels": self.accepted_emissions[idx],
-            "accepted_states": self.accepted_states[idx],
             "rejected_input_ids": self.rejected_emissions[idx],
             "rejected_labels": self.rejected_emissions[idx],
-            "rejected_states": self.rejected_states[idx],
             "accepted_hmm": self.accepted_hmm[idx] if (len(self.accepted_hmm) > 0) else 0,
             "rejected_hmm": self.rejected_hmm[idx] if (len(self.rejected_hmm) > 0) else 0,
             "accepted_logprobs": self.accepted_logprobs[idx],
             "rejected_logprobs": self.rejected_logprobs[idx],
         }
+        if self.keep_states:
+            ret["accepted_states"] = self.accepted_states[idx]
+            ret["rejected_states"] = self.rejected_states[idx]
+        return ret
     
     def make_subsets(self):
         datasets = defaultdict(list)
