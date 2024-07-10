@@ -92,7 +92,9 @@ def train():
 
     else:
         # data
-        train_dataset = HMMDataset(hmms=hmms, num_train_examples=data_args.num_train_examples, sample_length=10240)
+        train_dataset = None
+        if model_args.do_pretrain:
+            train_dataset = HMMDataset(hmms=hmms, num_train_examples=data_args.num_train_examples, sample_length=10240)
         eval_dataset = HMMDataset(hmms=hmms, num_train_examples=data_args.num_eval_examples, sample_length=1024)
         in_context_datasets = {}
         old_weights = deepcopy(hmms.weights)
