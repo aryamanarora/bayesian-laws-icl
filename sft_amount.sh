@@ -15,8 +15,12 @@ SFT_DIST=${2:-"1,0,0,0,0"}
 SFT_METHOD=${3:-"sft"}
 PERCENTAGES=("1perc" "5perc" "10perc" "20perc" "50perc" "100perc")
 NUM_TRAIN_EXAMPLES=1000
-LEARNING_RATE=8e-5
 NUM_TRAIN_EPOCHS=5
+MACHINE=${4:-""}
+
+if [ $MACHINE != "" ]; then
+    MACHINE=" -m $MACHINE"
+fi
 
 # create NUM_SFT_EXAMPLES
 NUM_SFT_EXAMPLES=""
@@ -41,11 +45,11 @@ if [ $SFT_METHOD == "sft" ] || [ $SFT_METHOD == "sft,dpo" ]; then
         --output_dir $NUM_HIDDEN_LAYERS-$PRETRAIN_DIST-$SFT_DIST \
         --num_train_examples $NUM_TRAIN_EXAMPLES \
         --num_sft_examples $NUM_SFT_EXAMPLES \
-        --learning_rate $LEARNING_RATE \
+        --learning_rate 8e-5 \
         --pretrain_dist $PRETRAIN_DIST \
         --sft_dist $SFT_DIST \
         --sft_method sft \
-        $TRAINING_OPTS" -r $MEMORY
+        $TRAINING_OPTS" -r $MEMORY$MACHINE
 
     # train SFT dist separately
     nlprun -n $NUM_HIDDEN_LAYERS-sft-only -g 1 "python train.py --num_hidden_layers $NUM_HIDDEN_LAYERS \
@@ -53,11 +57,11 @@ if [ $SFT_METHOD == "sft" ] || [ $SFT_METHOD == "sft,dpo" ]; then
         --output_dir $NUM_HIDDEN_LAYERS-$SFT_DIST-$SFT_DIST \
         --num_train_examples $NUM_TRAIN_EXAMPLES \
         --num_sft_examples 0 \
-        --learning_rate $LEARNING_RATE \
+        --learning_rate 8e-5 \
         --pretrain_dist $SFT_DIST \
         --sft_dist $SFT_DIST \
         --sft_method sft \
-        $TRAINING_OPTS" -r $MEMORY
+        $TRAINING_OPTS" -r $MEMORY$MACHINE
 
 fi
 
@@ -69,11 +73,11 @@ if [ $SFT_METHOD == "dpo" ] || [ $SFT_METHOD == "sft,dpo" ]; then
         --load_dir logs/$NUM_HIDDEN_LAYERS-$PRETRAIN_DIST-$SFT_DIST \
         --num_train_examples $NUM_TRAIN_EXAMPLES \
         --num_sft_examples $NUM_SFT_EXAMPLES \
-        --learning_rate $LEARNING_RATE \
+        --learning_rate 8e-7 \
         --pretrain_dist $PRETRAIN_DIST \
         --sft_dist $SFT_DIST \
         --sft_method $SFT_METHOD \
         --do_pretrain False \
-        $TRAINING_OPTS" -r $MEMORY
+        $TRAINING_OPTS" -r $MEMORY$MACHINE
 
 fi
