@@ -34,6 +34,7 @@ def train():
     training_args.data_args = asdict(data_args)
     training_args.model_args = asdict(model_args)
     training_args.output_dir = f"logs/{training_args.output_dir}"
+    run_name = training_args.output_dir.split("/")[-1]
     if training_args.load_dir is None:
         training_args.load_dir = training_args.output_dir
 
@@ -186,6 +187,7 @@ def train():
                 sft_trainer.args.num_train_epochs = 1
                 sft_trainer.args.warmup_steps = 0
                 sft_trainer.args.warmup_ratio = 0.1
+                sft_trainer.args.run_name = f"{run_name}_sft-{sft_amount}"
                 sft_trainer.args.set_evaluate(strategy="steps", steps=sft_amount // 5, delay=0)
                 sft_trainer.train()
 
@@ -230,10 +232,6 @@ def train():
                     hmms=hmms, accepted_dist=accepted_weights, rejected_dist=rejected_weights,
                     base_model=dpo_model, num_train_examples=sft_amount, sample_length=10240
                 )
-                dpo_eval_dataset = HMMPreferenceDataset(
-                    hmms=hmms, accepted_dist=accepted_weights, rejected_dist=rejected_weights,
-                    base_model=dpo_model, num_train_examples=50, sample_length=10240
-                )
 
                 # load model
                 dpo_trainer = DPOTrainer(
@@ -247,6 +245,7 @@ def train():
                 dpo_trainer.args.num_train_epochs = 1
                 dpo_trainer.args.warmup_steps = 0
                 dpo_trainer.args.warmup_ratio = 0.1
+                dpo_trainer.args.run_name = f"{run_name}_dpo-{sft_amount}"
                 dpo_trainer.args.set_evaluate(strategy="steps", steps=sft_amount // 5, delay=0)
                 dpo_trainer.train()
 

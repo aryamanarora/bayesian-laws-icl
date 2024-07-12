@@ -18,7 +18,7 @@ NUM_TRAIN_EXAMPLES=1000
 NUM_TRAIN_EPOCHS=5
 MACHINE=${4:-""}
 
-if [ $MACHINE != "" ]; then
+if [ "$MACHINE" != "" ]; then
     MACHINE=" -m $MACHINE"
 fi
 
@@ -73,7 +73,7 @@ if [ $SFT_METHOD == "dpo" ] || [ $SFT_METHOD == "sft,dpo" ]; then
         --load_dir logs/$NUM_HIDDEN_LAYERS-$PRETRAIN_DIST-$SFT_DIST \
         --num_train_examples $NUM_TRAIN_EXAMPLES \
         --num_sft_examples $NUM_SFT_EXAMPLES \
-        --learning_rate 8e-7 \
+        --learning_rate 8e-8 \
         --pretrain_dist $PRETRAIN_DIST \
         --sft_dist $SFT_DIST \
         --sft_method $SFT_METHOD \

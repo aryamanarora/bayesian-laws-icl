@@ -103,11 +103,11 @@ def fit_power_law(subset: pd.DataFrame, type="power"):
     patience = 5
     batch_size = 5
     history = []
+    subset = subset.sample(frac=1.0)
 
     optimizer = torch.optim.Adam(model.parameters(), lr=5e-2)
 
     for _ in iterator:
-        subset = subset.sample(frac=1.0)
         avg_loss = 0.0
         loss = 0.0
         for i in range(0, len(subset), batch_size):
@@ -201,11 +201,11 @@ def fit_bayesian_law(subset: pd.DataFrame):
     patience = 5
     batch_size = 20
     history = []
+    subset = subset.sample(frac=1.0)
 
     optimizer = torch.optim.Adam(model.parameters(), lr=5e-2)
 
     for _ in iterator:
-        subset = subset.sample(frac=1.0)
         avg_loss = 0.0
         loss = 0.0
         for i in range(0, len(subset), batch_size):
@@ -418,25 +418,6 @@ def analyse_folder(
             all_law_params_df['layers'] = layer
             all_law_params_df['method'] = method
             params_dfs.append(all_law_params_df)
-    
-    # plot power law params
-    all_law_params_df = pd.concat(params_dfs)
-    all_law_params_df = all_law_params_df.groupby(['sft_amount', 'k', 'hmm', 'layers', 'method', 'law']).mean().reset_index()
-
-    for method in all_law_params_df['method'].unique():
-        all_law_params_df_cur = all_law_params_df[all_law_params_df['method'] == method]
-        for law in all_law_params_df_cur['law'].unique():
-            cur_law_params_df = all_law_params_df_cur[all_law_params_df_cur['law'] == law].dropna()
-            for variable in cur_law_params_df.columns:
-                if variable in ['sft_amount', 'k', 'hmm', 'layers', 'method']:
-                    continue
-                plot = (
-                    ggplot(cur_law_params_df, aes(x="sft_amount", y=variable, color="hmm", group="hmm")) +
-                    facet_grid("layers~k", labeller="label_both") +
-                    geom_line() + geom_point() +
-                    theme(axis_text_x = element_text(angle=-90, hjust=0.5))
-                )
-                plot.save(f"{directory}/{law}_{method}_{variable}.png", dpi=300)
 
 
 def main():

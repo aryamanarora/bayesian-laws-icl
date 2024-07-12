@@ -246,7 +246,7 @@ class HMMDataset(Dataset):
         emissions, states, hmm = hmms.sample(num_train_examples, sample_length)
 
         # concatenate and make `block_size`-sized chunks
-        if self.block_size is not None:
+        if self.block_size < sample_length:
             for i in range(0, num_train_examples * sample_length, self.block_size):
                 cur_doc = i // sample_length
                 cur_pos = i % sample_length
@@ -334,7 +334,7 @@ class HMMPreferenceDataset(Dataset):
 
         # concatenate and make `block_size`-sized chunks
         with torch.inference_mode():
-            if self.block_size is not None:
+            if self.block_size < sample_length:
                 for i in range(0, num_train_examples * sample_length, self.block_size):
                     cur_doc = i // sample_length
                     cur_pos = i % sample_length
