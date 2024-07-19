@@ -4,14 +4,13 @@ import os
 import pandas as pd
 import torch
 import transformers
+import trl
 from collections import defaultdict
 from copy import deepcopy
 from data import HMMDataset, MixtureOfHmms, HMMInContextDataset, HMMPreferenceDataset, softmax
 from dataclasses import asdict
-from plotnine import ggplot, aes, geom_point, facet_wrap, facet_grid, geom_line, stat_summary, ylim
-from plotnine.scales import scale_y_log10, scale_x_log10
 from tqdm import tqdm
-from trainer import ModelArguments, DataArguments, TrainingArguments, SFTTrainer, DPOTrainer, in_context_eval
+from trainer import ModelArguments, DataArguments, TrainingArguments, SFTTrainer, DPOTrainer, DataCollator, in_context_eval
 
 device = "cpu" if not torch.cuda.is_available() else "cuda"
 
@@ -113,7 +112,7 @@ def train():
         if model_args.do_pretrain:
             # set up model
             config = transformers.CONFIG_MAPPING[model_args.model_type](
-                vocab_size=data_args.num_emissions,
+                vocab_size=data_args.num_emissions + 2,
                 num_hidden_layers=model_args.num_hidden_layers,
                 num_attention_heads=12,
                 num_key_value_heads=12,
@@ -160,6 +159,10 @@ def train():
             trainer.save_model()
             trainer.state.save_to_json(f"{training_args.output_dir}/trainer_state.json")
 
+            # save results
+            with open(f"{training_args.output_dir}/results.json", "w") as f:
+                f.write(str(results))
+
             # delete stuff to save memory
             del model
             del trainer
@@ -187,7 +190,8 @@ def train():
                 sft_trainer.args.num_train_epochs = 1
                 sft_trainer.args.warmup_steps = 0
                 sft_trainer.args.warmup_ratio = 0.1
-                sft_trainer.args.run_name = f"{run_name}_sft-{sft_amount}"
+                sft_trainer.args.report_to = []
+                # sft_trainer.args.run_name = f"{run_name}_sft-{sft_amount}"
                 sft_trainer.args.set_evaluate(strategy="steps", steps=sft_amount // 5, delay=0)
                 sft_trainer.train()
 
@@ -213,6 +217,13 @@ def train():
                         m["sft_amount"] = sft_amount
                     data.append(group_data(more))
                 print("Length of data after SFT eval:", len(data), data[-1])
+
+                # save trainer logs locally
+                sft_trainer.state.save_to_json(f"{training_args.output_dir}/trainer_state_sft.json")
+
+                # save results
+                with open(f"{training_args.output_dir}/results_sft.json", "w") as f:
+                    f.write(str(results))
                 
                 # delete stuff to save memory
                 del sft_dataset
@@ -228,33 +239,41 @@ def train():
                 accepted_weights /= accepted_weights.sum()
                 rejected_weights /= rejected_weights.sum()
                 dpo_model = transformers.AutoModelForCausalLM.from_pretrained(training_args.load_dir).to(device)
-                dpo_dataset = HMMPreferenceDataset(
+                dpo_dataset = HMMPreferenceDataset.make_dataset(
                     hmms=hmms, accepted_dist=accepted_weights, rejected_dist=rejected_weights,
-                    base_model=dpo_model, num_train_examples=sft_amount, sample_length=10240
+                    num_train_examples=sft_amount, sample_length=1024
                 )
 
                 # load model
                 dpo_trainer = DPOTrainer(
-                    model=dpo_model,
+                    dpo_model,
+                    None,
                     args=deepcopy(training_args),
                     train_dataset=dpo_dataset,
-                    eval_dataset=in_context_datasets,
+                    tokenizer=hmms.tokenizer,
+                    data_collator=DataCollator(),
                 )
                 dpo_trainer.sft_amount = sft_amount
-                dpo_trainer.train_dataset = dpo_dataset
                 dpo_trainer.args.num_train_epochs = 1
                 dpo_trainer.args.warmup_steps = 0
                 dpo_trainer.args.warmup_ratio = 0.1
-                dpo_trainer.args.run_name = f"{run_name}_dpo-{sft_amount}"
-                dpo_trainer.args.set_evaluate(strategy="steps", steps=sft_amount // 5, delay=0)
+                dpo_trainer.args.report_to = []
+                # dpo_trainer.args.run_name = f"{run_name}_dpo-{sft_amount}"
+                dpo_trainer.args.set_evaluate(strategy="no")
                 dpo_trainer.train()
 
-                # eval
-                data.append(group_data(dpo_trainer.data))
-                print("Length of data after SFT training:", len(data), data[-1])
+                # set up trainer
+                sft_trainer = SFTTrainer(
+                    model=dpo_model,
+                    args=deepcopy(training_args),
+                    train_dataset=None,
+                    eval_dataset=in_context_datasets,
+                )
+                sft_trainer.sft_amount = sft_amount
+                print("Length of data after DPO training:", len(data))
                 subsets = eval_dataset.make_subsets()
                 for hmm, subset in subsets.items():
-                    res = dpo_trainer.evaluate(eval_dataset=subset, metric_key_prefix=f'eval_sft_{hmm}', old=True)
+                    res = sft_trainer.evaluate(eval_dataset=subset, metric_key_prefix=f'eval_sft_{hmm}', old=True)
                     results[hmm]["sft"] = res[f'eval_sft_{hmm}_loss']
 
                 # print
@@ -264,13 +283,20 @@ def train():
 
                 # in-context eval
                 for k, in_context_dataset in in_context_datasets.items():
-                    more = in_context_eval(dpo_trainer, in_context_dataset, k)
+                    more = in_context_eval(sft_trainer, in_context_dataset, k)
                     for m in more:
                         m["sft"] = True
                         m["k"] = k
                         m["sft_amount"] = sft_amount
                     data.append(group_data(more))
-                print("Length of data after SFT eval:", len(data), data[-1])
+                print("Length of data after SFT eval:", len(data))
+
+                # save trainer logs locally
+                dpo_trainer.state.save_to_json(f"{training_args.output_dir}/trainer_state_dpo.json")
+
+                # save results
+                with open(f"{training_args.output_dir}/results_dpo.json", "w") as f:
+                    f.write(str(results))
                 
                 # delete stuff to save memory
                 del dpo_dataset

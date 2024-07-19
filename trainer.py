@@ -2,6 +2,7 @@ import torch
 import transformers
 from dataclasses import dataclass, field
 from typing import List
+import trl
 
 
 @dataclass
@@ -40,7 +41,7 @@ class TrainingArguments(transformers.TrainingArguments):
     per_device_train_batch_size: int = field(default=8)
     per_device_eval_batch_size: int = field(default=8)
     gradient_accumulation_steps: int = field(default=1)
-    torch_compile: bool = field(default=True)
+    torch_compile: bool = field(default=False)
     num_train_epochs: float = field(default=5.0)
     learning_rate: float = field(default=8e-4)
     warmup_steps: int = field(default=1000)
@@ -50,7 +51,29 @@ class TrainingArguments(transformers.TrainingArguments):
     beta: float = field(default=0.1)
     sft_method: str = field(default="sft", metadata={"help": "Method to use for SFT/RLHF."})
     load_dir: str | None = field(default=None)
-    remove_unused_columns: bool = field(default=False) # for dpo
+    remove_unused_columns: bool = field(default=False)
+
+    # some trl stuff
+    model_init_kwargs: dict | None = field(default=None)
+    ref_model_init_kwargs: dict | None = field(default=None)
+    generate_during_eval: bool = field(default=False)
+    model_adapter_name: str | None = field(default=None)
+    ref_adapter_name: str | None = field(default=None)
+    reference_free: bool = field(default=False)
+    max_length: int = field(default=1024)
+    max_prompt_length: int = field(default=1024)
+    max_target_length: int = field(default=1024)
+    label_pad_token_id: int = field(default=-100)
+    disable_dropout: bool = field(default=True)
+    truncation_mode: str = field(default="keep_end")
+    precompute_ref_log_probs: bool = field(default=True)
+    loss_type: str = field(default="sigmoid") # sigmoid is default dpo loss
+    label_smoothing: float = field(default=0.0)
+    dataset_num_proc: int | None = field(default=None)
+    sync_ref_model: bool = field(default=False)
+    f_divergence_type: str = field(default="reverse_kl")
+    f_alpha_divergence_coef: float = field(default=1.0)
+    rpo_alpha: float | None = field(default=None)
 
 
 def in_context_eval(trainer: transformers.Trainer, in_context_dataset, k: int):
@@ -111,27 +134,53 @@ class SFTTrainer(transformers.Trainer):
             return {}
 
 
-class DPOTrainer(transformers.Trainer):
-    def compute_loss(self, model, inputs, return_outputs=False):
-        if "rejected_input_ids" not in inputs:
-            inputs = {
-                "input_ids": inputs["input_ids"],
-                "labels": inputs["labels"],
-            }
-            return super().compute_loss(model, inputs, return_outputs)
-        accepted_outputs = model(input_ids=inputs["input_ids"], labels=inputs["labels"])
-        rejected_outputs = model(input_ids=inputs["rejected_input_ids"], labels=inputs["rejected_labels"])
+# class DPOTrainer(transformers.Trainer):
+#     def compute_loss(self, model, inputs, return_outputs=False):
+#         if "rejected_input_ids" not in inputs:
+#             inputs = {
+#                 "input_ids": inputs["input_ids"],
+#                 "labels": inputs["labels"],
+#             }
+#             return super().compute_loss(model, inputs, return_outputs)
+#         accepted_outputs = model(input_ids=inputs["input_ids"], labels=inputs["labels"])
+#         rejected_outputs = model(input_ids=inputs["rejected_input_ids"], labels=inputs["rejected_labels"])
 
-        accepted_logprobs = -accepted_outputs.loss # NLL -> logprob
-        rejected_logprobs = -rejected_outputs.loss
-        loss = (accepted_logprobs - inputs["accepted_logprobs"]) - (rejected_logprobs - inputs["rejected_logprobs"])
-        loss = -torch.log(torch.sigmoid(self.args.beta * loss))
-        return loss.mean()
+#         accepted_logprobs = -accepted_outputs.loss # NLL -> logprob
+#         rejected_logprobs = -rejected_outputs.loss
+#         loss = (accepted_logprobs - inputs["accepted_logprobs"]) - (rejected_logprobs - inputs["rejected_logprobs"])
+#         loss = -torch.log(torch.sigmoid(self.args.beta * loss))
+#         return loss.mean()
+
+#     def evaluate(self, eval_dataset=None, ignore_keys=None, metric_key_prefix="eval", old=False):
+#         # create data member var if not exists
+#         if not hasattr(self, "data"):
+#             self.data = []
+#         if eval_dataset is None:
+#             eval_dataset = self.eval_dataset
+
+#         # eval
+#         if old:
+#             return super().evaluate(eval_dataset, ignore_keys, metric_key_prefix)
+#         else:
+#             for k, in_context_dataset in eval_dataset.items():
+#                 step = self.state.global_step
+#                 more = in_context_eval(self, in_context_dataset, k)
+#                 for m in more:
+#                     m["k"] = k
+#                     m["sft"] = step
+#                     m["sft_amount"] = self.sft_amount
+#                 self.data.extend(more)
+#             return {}
+
+class DPOTrainer(trl.DPOTrainer):
 
     def evaluate(self, eval_dataset=None, ignore_keys=None, metric_key_prefix="eval", old=False):
         # create data member var if not exists
         if not hasattr(self, "data"):
             self.data = []
+            self.trainer = transformers.Trainer(
+                model=self.model,
+            )
         if eval_dataset is None:
             eval_dataset = self.eval_dataset
 
@@ -141,10 +190,18 @@ class DPOTrainer(transformers.Trainer):
         else:
             for k, in_context_dataset in eval_dataset.items():
                 step = self.state.global_step
-                more = in_context_eval(self, in_context_dataset, k)
+                more = in_context_eval(self.trainer, in_context_dataset, k)
                 for m in more:
                     m["k"] = k
                     m["sft"] = step
                     m["sft_amount"] = self.sft_amount
                 self.data.extend(more)
             return {}
+    
+    def tokenize_row(self, feature, model=None):
+        return feature
+
+
+class DataCollator(transformers.DefaultDataCollator):
+    def __call__(self, features, return_tensors=None):
+        return super().__call__(features, return_tensors=return_tensors)

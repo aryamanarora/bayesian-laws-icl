@@ -14,6 +14,10 @@ from hmmlearn.hmm import CategoricalHMM
 import random
 import matplotlib.pyplot as plt
 import torch
+from tokenizers import Tokenizer, models, pre_tokenizers, processors
+from transformers import PreTrainedTokenizerFast
+import datasets
+import json
 
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -192,6 +196,21 @@ class MixtureOfHmms:
                 value_transmat_seed=seed + 3,
             )
             self.hmms.append(hmm)
+        
+        # make tokenizer
+        vocab = {str(i): i for i in range(vocab_size)}
+        vocab["[PAD]"] = vocab_size
+        vocab["[BOS]"] = vocab_size + 1
+        tokenizer = Tokenizer(models.BPE(vocab=vocab, merges=[]))
+        tokenizer.pre_tokenizer = pre_tokenizers.Whitespace()
+        tokenizer.enable_padding(pad_id=vocab_size)
+        tokenizer.enable_truncation(max_length=10240)
+
+        # save tokenizer to json
+        tokenizer.save("tokenizer.json")
+
+        # load tokenizer
+        self.tokenizer = PreTrainedTokenizerFast(tokenizer_file="tokenizer.json")
     
 
     def sample(self, num_samples: int, length: int):
@@ -228,12 +247,16 @@ class MixtureOfHmms:
         plt.savefig("smoothedtransmat.png")
 
         return smoothed_mixture
+    
+
+    def detokenize(self, emissions: list[int]):
+        return " " + " ".join([str(emission) for emission in emissions])
 
 
 class HMMDataset(Dataset):
     def __init__(
         self, hmms: MixtureOfHmms, num_train_examples: int=10000, sample_length: int=1000, hmm: int=None,
-        block_size: int=1024,
+        block_size: int=1024, bos: bool=True
     ):
         super(HMMDataset, self).__init__()
         self.hmms = hmms
@@ -243,7 +266,10 @@ class HMMDataset(Dataset):
         self.block_size = block_size
 
         # generate data
-        emissions, states, hmm = hmms.sample(num_train_examples, sample_length)
+        emissions, states, hmm = hmms.sample(num_train_examples, (sample_length - 1) if bos else sample_length)
+        if bos:
+            emissions = [[hmms.vocab_size + 1] + emission for emission in emissions]
+            states = [[-1] + state for state in states]
 
         # concatenate and make `block_size`-sized chunks
         if self.block_size < sample_length:
@@ -253,6 +279,7 @@ class HMMDataset(Dataset):
                 next_doc = (i + self.block_size) // sample_length
                 next_pos = (i + self.block_size) % sample_length
                 chunk_emissions, chunk_states = [], []
+                hmms = set()
                 for j in range(cur_doc, next_doc + 1):
                     if j >= num_train_examples:
                         continue
@@ -268,8 +295,13 @@ class HMMDataset(Dataset):
                     else:
                         chunk_emissions.extend(emissions[j])
                         chunk_states.extend(states[j])
+                    hmms.add(hmm[j])
                 self.emissions.append(chunk_emissions)
                 self.states.append(chunk_states)
+                if len(hmms) == 1:
+                    self.hmm.append(hmms.pop())
+                else:
+                    self.hmm.append(-1)
         else:
             self.emissions = emissions
             self.states = states
@@ -285,149 +317,57 @@ class HMMDataset(Dataset):
         return {
             "input_ids": self.emissions[idx],
             "labels": self.emissions[idx],
-            "states": self.states[idx],
-            "hmm": self.hmm[idx] if (len(self.hmm) > 0) else 0,
+            # "states": self.states[idx],
+            # "hmm": self.hmm[idx] if (len(self.hmm) > 0) else 0,
         }
     
     def make_subsets(self):
         datasets = defaultdict(list)
         for i in range(self.length):
             item = self[i]
-            datasets[item["hmm"]].append(item)
+            datasets[self.hmm[i]].append(item)
         return datasets
 
 
 class HMMPreferenceDataset(Dataset):
-    def __init__(
-        self, hmms: MixtureOfHmms, accepted_dist: list[int], rejected_dist: list[int], base_model,
+
+    @staticmethod
+    def make_dataset(
+        hmms: MixtureOfHmms, accepted_dist: list[int], rejected_dist: list[int],
         num_train_examples: int=10000, sample_length: int=1000, hmm: int=None,
-        block_size: int=1024, keep_states=False,
+        block_size: int=1024,
     ):
-        super(HMMPreferenceDataset, self).__init__()
-        self.keep_states = keep_states
-        self.hmms = hmms
-        self.accepted_emissions = []
-        self.accepted_states = []
-        self.accepted_hmm = []
-        self.accepted_logprobs = []
-        self.rejected_emissions = []
-        self.rejected_states = []
-        self.rejected_hmm = []
-        self.rejected_logprobs = []
-        self.block_size = block_size
+        assert block_size >= sample_length, "block_size must be greater than or equal to sample_length"
 
-        # weights
-        print("Accepted dist:", accepted_dist)
-        print("Rejected dist:", rejected_dist)
+        # make dataset
+        dpo_dataset_dict = {}
 
-        # generate data
+        # first chosen
         old_weights = hmms.weights
-
-        # generate accepted data
         hmms.weights = np.array(accepted_dist)
-        accepted_emissions, accepted_states, accepted_hmm = hmms.sample(num_train_examples, sample_length)
+        dataset = HMMDataset(hmms, num_train_examples, sample_length, hmm, block_size, bos=False)
+        dpo_dataset_dict["chosen_input_ids"] = dataset.emissions
+        dpo_dataset_dict["chosen_labels"] = dataset.emissions
+        dpo_dataset_dict["chosen_attention_mask"] = [[1] * len(emission) for emission in dataset.emissions]
 
-        # generate rejected data
+        # then rejected
         hmms.weights = np.array(rejected_dist)
-        rejected_emissions, rejected_states, rejected_hmm = hmms.sample(num_train_examples, sample_length)
+        dataset = HMMDataset(hmms, num_train_examples, sample_length, hmm, block_size, bos=False)
+        dpo_dataset_dict["rejected_input_ids"] = dataset.emissions
+        dpo_dataset_dict["rejected_labels"] = dataset.emissions
+        dpo_dataset_dict["rejected_attention_mask"] = [[1] * len(emission) for emission in dataset.emissions]
+
+        # prompts are empty strings
+        dpo_dataset_dict["prompt_input_ids"] = [hmms.vocab_size + 1] * len(dpo_dataset_dict["chosen_input_ids"])
+        dpo_dataset_dict["prompt_token_type_ids"] = [0] * len(dpo_dataset_dict["chosen_input_ids"])
+        dpo_dataset_dict["prompt_attention_mask"] = [1] * len(dpo_dataset_dict["chosen_input_ids"])
+
+        # reset weights
         hmms.weights = old_weights
 
-        # concatenate and make `block_size`-sized chunks
-        with torch.inference_mode():
-            if self.block_size < sample_length:
-                for i in range(0, num_train_examples * sample_length, self.block_size):
-                    cur_doc = i // sample_length
-                    cur_pos = i % sample_length
-                    next_doc = (i + self.block_size) // sample_length
-                    next_pos = (i + self.block_size) % sample_length
-                    accepted_chunk_emissions, accepted_chunk_states = [], []
-                    rejected_chunk_emissions, rejected_chunk_states = [], []
-                    for j in range(cur_doc, next_doc + 1):
-                        if j >= num_train_examples:
-                            continue
-                        if cur_doc == next_doc:
-                            accepted_chunk_emissions.extend(accepted_emissions[j][cur_pos:next_pos])
-                            accepted_chunk_states.extend(accepted_states[j][cur_pos:next_pos])
-                            rejected_chunk_emissions.extend(rejected_emissions[j][cur_pos:next_pos])
-                            rejected_chunk_states.extend(rejected_states[j][cur_pos:next_pos])
-                        elif j == cur_doc:
-                            accepted_chunk_emissions.extend(accepted_emissions[j][cur_pos:])
-                            accepted_chunk_states.extend(accepted_states[j][cur_pos:])
-                            rejected_chunk_emissions.extend(rejected_emissions[j][cur_pos:])
-                            rejected_chunk_states.extend(rejected_states[j][cur_pos:])
-                        elif j == next_doc:
-                            accepted_chunk_emissions.extend(accepted_emissions[j][:next_pos])
-                            accepted_chunk_states.extend(accepted_states[j][:next_pos])
-                            rejected_chunk_emissions.extend(rejected_emissions[j][:next_pos])
-                            rejected_chunk_states.extend(rejected_states[j][:next_pos])
-                        else:
-                            accepted_chunk_emissions.extend(accepted_emissions[j])
-                            accepted_chunk_states.extend(accepted_states[j])
-                            rejected_chunk_emissions.extend(rejected_emissions[j])
-                            rejected_chunk_states.extend(rejected_states[j])
-                    self.accepted_emissions.append(accepted_chunk_emissions)
-                    self.rejected_emissions.append(rejected_chunk_emissions)
-                    if keep_states:
-                        self.accepted_states.append(accepted_chunk_states)
-                        self.rejected_states.append(rejected_chunk_states)
-                    
-                    # calculate logprobs
-                    accepted_input_ids = torch.tensor(accepted_chunk_emissions).to(DEVICE)
-                    rejected_input_ids = torch.tensor(rejected_chunk_emissions).to(DEVICE)
-                    accepted_logprobs = -base_model(input_ids=accepted_input_ids, labels=accepted_input_ids)["loss"]
-                    rejected_logprobs = -base_model(input_ids=rejected_input_ids, labels=rejected_input_ids)["loss"]
-                    self.accepted_logprobs.append(accepted_logprobs.item())
-                    self.rejected_logprobs.append(rejected_logprobs.item())
-            else:
-                self.accepted_emissions = accepted_emissions
-                self.accepted_states = accepted_states
-                self.accepted_hmm = accepted_hmm
-                self.rejected_emissions = rejected_emissions
-                self.rejected_states = rejected_states
-                self.rejected_hmm = rejected_hmm
-                    
-                # calculate logprobs
-                for i in range(len(accepted_emissions)):
-                    accepted_input_ids = torch.tensor(accepted_emissions[i]).to(DEVICE)
-                    rejected_input_ids = torch.tensor(rejected_emissions[i]).to(DEVICE)
-                    accepted_logprobs = -base_model(input_ids=accepted_input_ids, labels=accepted_input_ids)["loss"]
-                    rejected_logprobs = -base_model(input_ids=rejected_input_ids, labels=rejected_input_ids)["loss"]
-                    self.accepted_logprobs.append(accepted_logprobs.item())
-                    self.rejected_logprobs.append(rejected_logprobs.item())
-
-            # length
-            assert len(self.accepted_emissions) == len(self.rejected_emissions), "Lengths of accepted and rejected data do not match"
-            self.length = len(self.accepted_emissions)
-        
-        if not keep_states:
-            self.accepted_states = []
-            self.rejected_states = []
-    
-    def __len__(self):
-        return self.length
-    
-    def __getitem__(self, idx):
-        ret = {
-            "input_ids": self.accepted_emissions[idx],
-            "labels": self.accepted_emissions[idx],
-            "rejected_input_ids": self.rejected_emissions[idx],
-            "rejected_labels": self.rejected_emissions[idx],
-            "accepted_hmm": self.accepted_hmm[idx] if (len(self.accepted_hmm) > 0) else 0,
-            "rejected_hmm": self.rejected_hmm[idx] if (len(self.rejected_hmm) > 0) else 0,
-            "accepted_logprobs": self.accepted_logprobs[idx],
-            "rejected_logprobs": self.rejected_logprobs[idx],
-        }
-        if self.keep_states:
-            ret["accepted_states"] = self.accepted_states[idx]
-            ret["rejected_states"] = self.rejected_states[idx]
-        return ret
-    
-    def make_subsets(self):
-        datasets = defaultdict(list)
-        for i in range(self.length):
-            item = self[i]
-            datasets[item["hmm"]].append(item)
-        return datasets
+        # make dataset
+        dataset = datasets.Dataset.from_dict(dpo_dataset_dict)
+        return dataset
 
 
 class HMMInContextDataset(Dataset):
@@ -496,14 +436,14 @@ class HMMInContextDataset(Dataset):
         return {
             "input_ids": self.emissions[idx],
             "labels": self.labels[idx],
-            "entities": self.entities[idx],
-            "properties": self.properties[idx],
-            "hmm": self.hmm[idx],
+            # "entities": self.entities[idx],
+            # "properties": self.properties[idx],
+            # "hmm": self.hmm[idx],
         }
     
     def make_subsets(self):
         datasets = defaultdict(list)
         for i in range(self.length):
             item = self[i]
-            datasets[item["hmm"]].append(item)
+            datasets[self.hmm[i]].append(item)
         return datasets

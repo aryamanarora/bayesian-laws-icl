@@ -135,7 +135,7 @@ def fit_power_law(subset: pd.DataFrame, type="power"):
         iterator.set_postfix(result)
 
         # early stopping
-        if len(history) > patience and all([math.isclose(history[-1], x, rel_tol=1e-3) for x in history[-patience:]]):
+        if len(history) > patience and all([math.isclose(history[-1], x, rel_tol=5e-2) for x in history[-patience:]]):
             break
     
     return model
@@ -175,12 +175,16 @@ class BayesianLawFit(torch.nn.Module):
         priors = self.get_prior().log()
         gammas = self.get_gammas().log()
         betas = self.get_betas().log()
+        K = self.get_K()
+        shots = shots * K
+        if isinstance(shots, torch.Tensor):
+            shots = shots.unsqueeze(-1)
         # print("hmm:", hmm)
         # print("K:", self.K.item())
         # print("p(hmm):", priors.exp().tolist())
         p_under_dist = torch.where(self.masks[hmm], gammas, betas)
         # print("p(d | hmm):", p_under_dist.exp().tolist())
-        p_seq_under_dist = p_under_dist * (shots * self.get_K()).unsqueeze(-1)
+        p_seq_under_dist = p_under_dist * shots
         # print("p(D | hmm):", p_seq_under_dist.exp().tolist())
         posteriors = torch.nn.functional.softmax(priors + p_seq_under_dist, dim=-1) # already in log space
         # print("p(hmm | D):", posteriors.tolist())
@@ -233,7 +237,7 @@ def fit_bayesian_law(subset: pd.DataFrame):
         iterator.set_postfix(result)
 
         # early stopping
-        if len(history) > patience and all([math.isclose(history[-1], x, rel_tol=1e-3) for x in history[-patience:]]):
+        if len(history) > patience and all([math.isclose(history[-1], x, rel_tol=5e-2) for x in history[-patience:]]):
             break
     
     return model
