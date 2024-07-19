@@ -268,8 +268,10 @@ class HMMDataset(Dataset):
         # generate data
         emissions, states, hmm = hmms.sample(num_train_examples, (sample_length - 1) if bos else sample_length)
         if bos:
-            emissions = [[hmms.vocab_size + 1] + emission for emission in emissions]
-            states = [[-1] + state for state in states]
+            emissions = [np.concatenate([[hmms.vocab_size + 1], emission]) for emission in emissions]
+            states = [np.concatenate([[-1], state]) for state in states]
+        for i in range(num_train_examples):
+            assert len(emissions[i]) == sample_length, f"emission length: {len(emissions[i])}, sample_length: {sample_length}: {emissions[i]}"
 
         # concatenate and make `block_size`-sized chunks
         if self.block_size < sample_length:
@@ -447,3 +449,11 @@ class HMMInContextDataset(Dataset):
             item = self[i]
             datasets[self.hmm[i]].append(item)
         return datasets
+
+
+if __name__ == "__main__":
+    # make hmms
+    hmms = MixtureOfHmms(num_hmms=5, num_entities=10, num_properties=10)
+
+    # dataset
+    dataset = HMMDataset(hmms, num_train_examples=10, sample_length=100)

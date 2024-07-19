@@ -1,5 +1,6 @@
 __pycache__/
 logs/
+logs-old/
 wandb/
 *.out
 count.py
