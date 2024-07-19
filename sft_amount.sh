@@ -24,15 +24,19 @@ fi
 
 # create NUM_SFT_EXAMPLES
 NUM_SFT_EXAMPLES=""
+NUM_DPO_EXAMPLES=""
 for PERCENTAGE in "${PERCENTAGES[@]}"
 do
     PERCENTAGE_VALUE=${PERCENTAGE%perc}
     CALCULATED_VALUE=$((NUM_TRAIN_EXAMPLES * PERCENTAGE_VALUE * NUM_TRAIN_EPOCHS / 100))
     NUM_SFT_EXAMPLES+="$CALCULATED_VALUE,"
+    CALCULATED_DPO_VALUE=$((CALCULATED_VALUE * 10)) # dpo docs are 1/10th the length of sft docs
+    NUM_DPO_EXAMPLES+="$CALCULATED_DPO_VALUE,"
 done
 
 # remove trailing comma
 NUM_SFT_EXAMPLES=${NUM_SFT_EXAMPLES%,}
+NUM_DPO_EXAMPLES=${NUM_DPO_EXAMPLES%,}
 
 # print num_sft_examples
 echo $NUM_SFT_EXAMPLES
@@ -72,7 +76,7 @@ if [ $SFT_METHOD == "dpo" ] || [ $SFT_METHOD == "sft,dpo" ]; then
         --output_dir $NUM_HIDDEN_LAYERS-$PRETRAIN_DIST-$SFT_DIST-dpo \
         --load_dir logs/$NUM_HIDDEN_LAYERS-$PRETRAIN_DIST-$SFT_DIST \
         --num_train_examples $NUM_TRAIN_EXAMPLES \
-        --num_sft_examples $NUM_SFT_EXAMPLES \
+        --num_sft_examples $NUM_DPO_EXAMPLES \
         --learning_rate 8e-8 \
         --pretrain_dist $PRETRAIN_DIST \
         --sft_dist $SFT_DIST \
