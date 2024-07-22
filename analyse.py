@@ -5,7 +5,7 @@ training/SFT/RLHF experiments.
 
 from plotnine import (
     ggplot, aes, geom_line, geom_point, facet_grid, stat_summary,
-    theme, element_text
+    theme, element_text, theme_bw
 )
 from plotnine.scales import scale_y_log10, scale_x_log10
 from scipy.optimize import curve_fit
@@ -16,6 +16,7 @@ import argparse
 import os
 import math
 import torch
+import json
 from tqdm import tqdm
 from copy import deepcopy
 from collections import defaultdict
@@ -424,14 +425,51 @@ def analyse_folder(
             params_dfs.append(all_law_params_df)
 
 
+def analyse_loss(
+    pretrain: str="1,1,1,1,1",
+    sft: str="1,0,0,0,0",
+    layers: str="4,8,12"
+):
+    dfs = []
+    for layer in layers.split(","):
+        # set up dir
+        directory = f"logs/{layer}-{pretrain}-{sft}/"
+        if os.path.exists(f"{directory}/in_context_probs.csv"):
+            # load data
+            with open(f"{directory}/trainer_state.json", "r") as f:
+                data = pd.DataFrame(json.load(f)["log_history"])
+            data['layers'] = int(layer)
+            dfs.append(data)
+        else:
+            print(f"Directory {directory} does not exist")
+    
+    # format df
+    df_all = pd.concat(dfs)
+    order = list(map(str, sorted(df_all['layers'].unique())))
+    df_all['layers'] = df_all['layers'].astype(str)
+    df_all['layers'] = pd.Categorical(df_all['layers'], categories=order, ordered=True)
+
+    # plot
+    plot = (
+        ggplot(df_all, aes(x='epoch', y='loss', color='layers', group='layers')) +
+        geom_line() + theme_bw() +
+        theme(axis_text_x=element_text(rotation=90))
+    )
+    plot.save(f"figs/loss-{pretrain}-{sft}.pdf", width=4, height=3.5)
+
+
 def main():
     parser = argparse.ArgumentParser(description='Analyse results')
     parser.add_argument('--pretrain', type=str, default="1,1,1,1,1", help='Pretrain amounts')
     parser.add_argument('--sft', type=str, default="1,0,0,0,0", help='SFT amounts')
-    parser.add_argument('--layers', type=str, default="4,8,12,16", help='Number of layers')
+    parser.add_argument('--layers', type=str, default="1,2,4,8,12,16", help='Number of layers')
+    parser.add_argument('--loss', action='store_true', help='Analyse loss')
     args = parser.parse_args()
 
-    analyse_folder(**vars(args))
+    if args.loss:
+        analyse_loss(pretrain=args.pretrain, sft=args.sft, layers=args.layers)
+    else:
+        analyse_folder(pretrain=args.pretrain, sft=args.sft, layers=args.layers)
 
 
 if __name__ == "__main__":
