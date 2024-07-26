@@ -315,7 +315,7 @@ def analyse_folder(
             layer = int(layer)
             df = df_all[
                 (df_all['layers'] == layer) &
-                (df_all['sft_amount'] == df_all['sft']) &
+                (df_all['sft'].isin(["True", "False", "none"])) &
                 (df_all['method'] == method)
             ]
             if len(df) == 0:
