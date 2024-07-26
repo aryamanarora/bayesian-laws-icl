@@ -243,6 +243,10 @@ def train():
                     hmms=hmms, accepted_dist=accepted_weights, rejected_dist=rejected_weights,
                     num_train_examples=sft_amount, sample_length=1024
                 )
+                dpo_eval_dataset = HMMPreferenceDataset.make_dataset(
+                    hmms=hmms, accepted_dist=accepted_weights, rejected_dist=rejected_weights,
+                    num_train_examples=data_args.num_eval_examples, sample_length=1024
+                )
 
                 # load model
                 dpo_trainer = DPOTrainer(
@@ -250,6 +254,7 @@ def train():
                     None,
                     args=deepcopy(training_args),
                     train_dataset=dpo_dataset,
+                    eval_dataset=dpo_eval_dataset,
                     tokenizer=hmms.tokenizer,
                     data_collator=DataCollator(),
                 )
@@ -259,7 +264,7 @@ def train():
                 dpo_trainer.args.warmup_ratio = 0.1
                 dpo_trainer.args.report_to = []
                 # dpo_trainer.args.run_name = f"{run_name}_dpo-{sft_amount}"
-                dpo_trainer.args.set_evaluate(strategy="no")
+                dpo_trainer.args.set_evaluate(strategy="steps", steps=sft_amount // 5, delay=0)
                 dpo_trainer.train()
 
                 # set up trainer
