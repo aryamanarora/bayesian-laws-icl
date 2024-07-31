@@ -434,7 +434,8 @@ def analyse_loss(
     for layer in layers.split(","):
         # set up dir
         directory = f"logs/{layer}-{pretrain}-{sft}/"
-        if os.path.exists(f"{directory}/in_context_probs.csv"):
+        if os.path.exists(f"{directory}/trainer_state.json"):
+            print("Loading", directory)
             # load data
             with open(f"{directory}/trainer_state.json", "r") as f:
                 data = pd.DataFrame(json.load(f)["log_history"])
@@ -455,19 +456,68 @@ def analyse_loss(
         geom_line() + theme_bw() +
         theme(axis_text_x=element_text(rotation=90))
     )
-    plot.save(f"figs/loss-{pretrain}-{sft}.pdf", width=4, height=3.5)
+    plot.save(f"figs/loss-{pretrain}-{sft}.pdf", width=4, height=3)
+
+
+def analyse_params(
+    pretrain: str="1,1,1,1,1",
+    sft: str="1,0,0,0,0",
+    layers: str="4,8,12"
+):
+    dfs = []
+    for layer in layers.split(","):
+        # set up dir
+        directory = f"figs/{pretrain}-{sft}/"
+        if os.path.exists(f"{directory}/all_law_params-{layer}-sft.csv"):
+            # load data
+            data = pd.read_csv(f"{directory}/all_law_params-{layer}-sft.csv")
+            data['layers'] = int(layer)
+            dfs.append(data)
+        else:
+            print(f"File {directory}/all_law_params-{layer}-sft.csv does not exist")
+    
+    # format df
+    df_all = pd.concat(dfs)
+    order = list(map(str, sorted(df_all['layers'].unique())))
+    df_all['layers'] = df_all['layers'].astype(str)
+
+    # drop sft_amount == "none"
+    df_all = df_all[df_all['sft_amount'] != "none"]
+    df_all['sft_amount'] = df_all['sft_amount'].astype(float)
+
+    # plot
+    for law in df_all['law'].unique():
+        df_filtered = df_all[df_all['law'] == law]
+
+        if law == "bayesian":
+            # make gamma and beta into one column, with metric as another column
+            df = pd.melt(df_filtered, id_vars=['sft_amount', 'k', 'hmm', 'layers'], value_vars=['gamma', 'beta'], var_name='metric', value_name='value')
+
+        for column in df_filtered.columns:
+            if column in ['sft_amount', 'k', 'hmm', 'law', 'mse', 'layers']:
+                continue
+            plot = (
+                ggplot(df_filtered, aes(x='sft_amount', y=column, color='layers', group='layers')) +
+                geom_line() + geom_point() + theme_bw() + scale_x_log10() +
+                theme(axis_text_x=element_text(rotation=90)) +
+                facet_grid("k~hmm", labeller="label_both")
+            )
+            plot.save(f"figs/{pretrain}-{sft}/{law}-{column}-{pretrain}-{sft}.pdf", width=10, height=10)
 
 
 def main():
     parser = argparse.ArgumentParser(description='Analyse results')
     parser.add_argument('--pretrain', type=str, default="1,1,1,1,1", help='Pretrain amounts')
     parser.add_argument('--sft', type=str, default="1,0,0,0,0", help='SFT amounts')
-    parser.add_argument('--layers', type=str, default="1,2,4,8,12,16", help='Number of layers')
+    parser.add_argument('--layers', type=str, default="1,2,3,4,8,12,16", help='Number of layers')
     parser.add_argument('--loss', action='store_true', help='Analyse loss')
+    parser.add_argument('--params', action='store_true', help='Analyse params')
     args = parser.parse_args()
 
     if args.loss:
         analyse_loss(pretrain=args.pretrain, sft=args.sft, layers=args.layers)
+    elif args.params:
+        analyse_params(pretrain=args.pretrain, sft=args.sft, layers=args.layers)
     else:
         analyse_folder(pretrain=args.pretrain, sft=args.sft, layers=args.layers)
 

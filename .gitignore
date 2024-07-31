@@ -9,3 +9,4 @@ train.json
 train.txt
 figs/
 tokenizer.json
+.ipynb_checkpoints/

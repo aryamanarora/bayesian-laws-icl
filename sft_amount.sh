@@ -77,7 +77,7 @@ if [ $SFT_METHOD == "dpo" ] || [ $SFT_METHOD == "sft,dpo" ]; then
         --load_dir logs/$NUM_HIDDEN_LAYERS-$PRETRAIN_DIST-$SFT_DIST \
         --num_train_examples $NUM_TRAIN_EXAMPLES \
         --num_sft_examples $NUM_DPO_EXAMPLES \
-        --learning_rate 8e-8 \
+        --learning_rate 8e-6 \
         --pretrain_dist $PRETRAIN_DIST \
         --sft_dist $SFT_DIST \
         --sft_method $SFT_METHOD \
