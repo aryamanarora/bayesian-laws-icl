@@ -396,7 +396,11 @@ def analyse_folder(
                     (df['k'] == row['k']) &
                     (df['hmm'] == row['hmm'])
                 ][f'mse_{row["law"]}'].mean()
+                rmse = math.sqrt(mse)
+                nrmse = rmse / df['nll'].mean()
                 all_params_list[i]['mse'] = mse
+                all_params_list[i]['rmse'] = rmse
+                all_params_list[i]['nrmse'] = nrmse
 
             # plot
             suffix = f"-{layer}-{method}"
