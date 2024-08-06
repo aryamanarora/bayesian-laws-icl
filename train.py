@@ -192,7 +192,9 @@ def train():
                 sft_trainer.args.warmup_ratio = 0.1
                 sft_trainer.args.report_to = []
                 # sft_trainer.args.run_name = f"{run_name}_sft-{sft_amount}"
-                sft_trainer.args.set_evaluate(strategy="steps", steps=sft_amount // 5, delay=0)
+                total_steps = (len(sft_dataset) * sft_trainer.args.num_train_epochs) // (sft_trainer.args.per_device_train_batch_size * sft_trainer.args.gradient_accumulation_steps)
+                print(f"Training for {total_steps} steps")
+                sft_trainer.args.set_evaluate(strategy="steps", steps=total_steps // 5, delay=0)
                 sft_trainer.train()
 
                 # eval
@@ -263,9 +265,13 @@ def train():
                 dpo_trainer.args.warmup_steps = 0
                 dpo_trainer.args.warmup_ratio = 0.1
                 dpo_trainer.args.report_to = []
+                dpo_trainer.icl_dataset = in_context_datasets
                 # dpo_trainer.args.run_name = f"{run_name}_dpo-{sft_amount}"
-                dpo_trainer.args.set_evaluate(strategy="steps", steps=sft_amount // 5, delay=0)
+                total_steps = (len(dpo_dataset) * dpo_trainer.args.num_train_epochs) // (dpo_trainer.args.per_device_train_batch_size * dpo_trainer.args.gradient_accumulation_steps)
+                print(f"Training for {total_steps} steps")
+                dpo_trainer.args.set_evaluate(strategy="steps", steps=total_steps // 5, delay=0)
                 dpo_trainer.train()
+                data.append(group_data(dpo_trainer.data))
 
                 # set up trainer
                 sft_trainer = SFTTrainer(

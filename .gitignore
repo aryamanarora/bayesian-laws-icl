@@ -10,3 +10,5 @@ train.txt
 figs/
 tokenizer.json
 .ipynb_checkpoints/
+logs-test/
+test.sh

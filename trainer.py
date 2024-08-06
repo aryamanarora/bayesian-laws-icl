@@ -95,8 +95,9 @@ def in_context_eval(trainer: transformers.Trainer, in_context_dataset, k: int):
             shots = i // (k + 1)
             label = result.label_ids[:, i] # shape: (bs,)
             # get the prob of the correct label for each example
-            prob = probs[torch.arange(probs.shape[0]), i, label]
-            argmax = probs[torch.arange(probs.shape[0]), i].argmax(-1)
+            arange = torch.arange(probs.shape[0])
+            prob = probs[arange, i, label]
+            argmax = probs[arange, i].argmax(-1)
             for j in range(len(prob)):
                 in_context_probs.append({
                     "shots": shots,
@@ -174,29 +175,28 @@ class SFTTrainer(transformers.Trainer):
 
 class DPOTrainer(trl.DPOTrainer):
 
-    def evaluate(self, eval_dataset=None, ignore_keys=None, metric_key_prefix="eval", old=False):
+    def evaluate(self, eval_dataset=None, ignore_keys=None, metric_key_prefix="eval"):
         # create data member var if not exists
         if not hasattr(self, "data"):
             self.data = []
-            self.trainer = transformers.Trainer(
+            self.trainer = SFTTrainer(
                 model=self.model,
+                eval_dataset=self.icl_dataset,
             )
+            self.trainer.data = []
+            self.trainer.sft_amount = self.sft_amount
         if eval_dataset is None:
             eval_dataset = self.eval_dataset
 
         # eval
-        if old:
-            return super().evaluate(eval_dataset, ignore_keys, metric_key_prefix)
-        else:
-            for k, in_context_dataset in eval_dataset.items():
-                step = self.state.global_step
-                more = in_context_eval(self.trainer, in_context_dataset, k)
-                for m in more:
-                    m["k"] = k
-                    m["sft"] = step
-                    m["sft_amount"] = self.sft_amount
-                self.data.extend(more)
-            return {}
+        self.trainer.evaluate()
+        more = self.trainer.data
+        for m in more:
+            m["sft"] = self.state.global_step
+            m["sft_amount"] = self.sft_amount
+        self.data.extend(more)
+        self.trainer.data = []
+        return super().evaluate(eval_dataset, ignore_keys, metric_key_prefix)
     
     def tokenize_row(self, feature, model=None):
         return feature

@@ -22,7 +22,7 @@ from copy import deepcopy
 from collections import defaultdict
 
 
-DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+DEVICE = "cpu"
 
 
 class PowerLawFit(torch.nn.Module):
@@ -136,24 +136,26 @@ def fit_power_law(subset: pd.DataFrame, type="power"):
         iterator.set_postfix(result)
 
         # early stopping
-        if len(history) > patience and all([math.isclose(history[-1], x, rel_tol=5e-2) for x in history[-patience:]]):
+        if len(history) > patience and all([math.isclose(history[-1], x, rel_tol=5e-3) for x in history[-patience:]]):
             break
     
     return model
 
 
 class BayesianLawFit(torch.nn.Module):
-    def __init__(self, num_hmms):
+    def __init__(self, num_hmms, sft_amounts=None):
         super(BayesianLawFit, self).__init__()
         self.num_hmms = num_hmms
         self.masks = torch.eye(num_hmms, dtype=torch.bool).to(DEVICE)
-        self.priors = torch.nn.Parameter(torch.zeros(num_hmms))
+        self.sft_amount_d = {sft: i for i, sft in enumerate(sft_amounts)}
+        self.sft_amounts = np.vectorize(self.sft_amount_d.get)
+        self.priors = torch.nn.Parameter(torch.zeros(len(sft_amounts), num_hmms))
         self.gammas = torch.nn.Parameter(torch.zeros(num_hmms) + 1)
         self.betas = torch.nn.Parameter(torch.zeros(num_hmms) - 1)
-        self.K = torch.nn.Parameter(torch.tensor(0.0))
+        self.K = torch.nn.Parameter(torch.zeros(len(sft_amounts)))
     
-    def get_prior(self):
-        return torch.nn.functional.softmax(self.priors, dim=0)
+    def get_prior(self, sft_amount=None):
+        return torch.nn.functional.softmax(self.priors[sft_amount], dim=-1)
 
     def get_gammas(self):
         return torch.sigmoid(self.gammas)
@@ -161,22 +163,23 @@ class BayesianLawFit(torch.nn.Module):
     def get_betas(self):
         return torch.sigmoid(self.betas)
     
-    def get_K(self):
-        return torch.exp(self.K)
+    def get_K(self, sft_amount=None):
+        return torch.exp(self.K[sft_amount])
 
     def get_params(self):
         return {
             "priors": self.get_prior().tolist(),
             "gammas": self.get_gammas().tolist(),
             "betas": self.get_betas().tolist(),
-            "K": self.get_K().item()
+            "K": self.get_K().tolist(),
         }
 
-    def forward(self, shots, hmm):
-        priors = self.get_prior().log()
+    def forward(self, shots, hmm, sft_amount):
+        sft_amount = torch.tensor(self.sft_amounts(sft_amount.numpy())).to(DEVICE)
+        priors = self.get_prior(sft_amount).log()
         gammas = self.get_gammas().log()
         betas = self.get_betas().log()
-        K = self.get_K()
+        K = self.get_K(sft_amount)
         shots = shots * K
         if isinstance(shots, torch.Tensor):
             shots = shots.unsqueeze(-1)
@@ -198,9 +201,10 @@ class BayesianLawFit(torch.nn.Module):
         return est_nll
 
 
-def fit_bayesian_law(subset: pd.DataFrame):
+def fit_bayesian_law(subset: pd.DataFrame, sft_amount=False):
     # fit power law
-    model = BayesianLawFit(len(subset['hmm'].unique()))
+    sft_amounts = None if not sft_amount else list(subset['sft_amount'].unique())
+    model = BayesianLawFit(len(subset['hmm'].unique()), sft_amounts)
     model.to(DEVICE)
     iterator = tqdm(range(100))
     patience = 5
@@ -219,7 +223,11 @@ def fit_bayesian_law(subset: pd.DataFrame):
             shots = torch.tensor(batch['shots'].values, dtype=torch.float32).to(DEVICE)
             hmm = torch.tensor(list(map(int, batch['hmm'].values)), dtype=torch.int32).to(DEVICE)
             true_nll = torch.tensor(batch['nll'].values, dtype=torch.float32).to(DEVICE)
-            est_nll = model(shots, hmm)
+            if sft_amount:
+                sft_amounts = torch.tensor(batch['sft_amount'].values, dtype=torch.float32).to(DEVICE)
+                est_nll = model(shots, hmm, sft_amounts)
+            else:
+                est_nll = model(shots, hmm)
             loss = ((true_nll - est_nll)**2).sum()
             loss.backward()
             optimizer.step()
@@ -232,13 +240,13 @@ def fit_bayesian_law(subset: pd.DataFrame):
             "loss": avg_loss,
             "gamma_0": model.get_gammas()[0].item(),
             "beta_0": model.get_betas()[0].item(),
-            "K": model.get_K().item(),
+            "K": model.get_K().tolist(),
         }
-        result.update({f"p_{i}": p.item() for i, p in enumerate(model.get_prior())})
+        # result.update({f"p_{i}": p.item() for i, p in enumerate(model.get_prior())})
         iterator.set_postfix(result)
 
         # early stopping
-        if len(history) > patience and all([math.isclose(history[-1], x, rel_tol=5e-2) for x in history[-patience:]]):
+        if len(history) > patience and all([math.isclose(history[-1], x, rel_tol=5e-3) for x in history[-patience:]]):
             break
     
     return model
@@ -313,9 +321,10 @@ def analyse_folder(
         for layer in layers.split(","):
             # get subset
             layer = int(layer)
+            print(df_all)
             df = df_all[
                 (df_all['layers'] == layer) &
-                (df_all['sft'].isin(["True", "False", "none"])) &
+                ((df_all['sft'].isin(["True", "False", "none"])) | (df_all['sft'] == df_all['sft_amount'])) &
                 (df_all['method'] == method)
             ]
             if len(df) == 0:
@@ -325,6 +334,8 @@ def analyse_folder(
             print(f"Power law fit for {layer}-layer model, {method} method")
             all_params = defaultdict(dict)
             all_params_list = []
+
+            # all exps, only change is sft_amount
 
             # each exp
             for sft_amount in df['sft_amount'].unique():
