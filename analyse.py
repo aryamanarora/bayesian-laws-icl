@@ -404,3 +404,110 @@ def fit_power_law(
             break
     
     return model
+
+def compute_all_fits(
+    subset: pd.DataFrame,
+    max_shots: float=1.0,
+    quiet: bool=False,
+    patience: int=5,
+    epochs: int=50,
+    lr: float=5e-2,
+    num_hmms: int=None,
+    i: int=0,
+    metadata: dict={},
+) -> tuple:
+    """
+    Compute all of the fits for a given subset of the data.
+
+    Args:
+        subset (pd.DataFrame): The subset of the data to fit.
+        max_shots (float): The maximum shots to train on, as a fraction of the data.
+        quiet (bool): Whether to be quiet.
+        patience (int): The patience for early stopping.
+        epochs (int): The number of epochs to train for.
+        lr (float): The learning rate.
+        num_hmms (int): The number of subdistributions.
+        i (int): The index of the run, for setting seed.
+        metadata (dict): The metadata to add to the results.
+    """
+
+    # set up extrapolation test if needed
+    max_shots *= subset["shots"].max()
+    models = {}
+    all_params = []
+    
+    # fit bayesian law
+    torch.manual_seed(42 + i)
+    np.random.seed(42 + i)
+    for do_log_shots in [True, False]:
+        for law in bayesian_law_mapping.keys():
+            bayesian_model = fit_bayesian_law(
+                subset[subset["shots"] <= max_shots], False, law, quiet=quiet, num_hmms=num_hmms,
+                patience=patience, epochs=epochs, lr=lr, do_log_shots=do_log_shots,
+            )
+            models[law if not do_log_shots else f"{law} (log)"] = bayesian_model
+
+    # per-hmm fits
+    for hmm in range(len(subset["hmm"].unique())):
+        subset_hmm = subset[subset['hmm'] == hmm]
+        subset_hmm_extrapolate = subset_hmm[subset_hmm["shots"] > max_shots]
+        if len(subset_hmm_extrapolate) == 0:
+            subset_hmm_extrapolate = subset_hmm
+        shots = torch.tensor(subset_hmm_extrapolate['shots'].values, dtype=torch.float32).to(DEVICE)
+        hmms = torch.tensor(list(map(int, subset_hmm_extrapolate['hmm'].values)), dtype=torch.int32).to(DEVICE)
+        true_nll = torch.tensor(subset_hmm_extrapolate['nll'].values, dtype=torch.float32).to(DEVICE)
+        
+        # bayesian
+        for do_log_shots in [True, False]:
+            for law in bayesian_law_mapping.keys():
+                bayesian_model = models[law if not do_log_shots else f"{law} (log)"]
+                more = bayesian_model.get_params()
+                
+                est_nll = bayesian_model(shots, hmms)
+                rmse = ((true_nll - est_nll)**2).mean()**0.5
+                nrmse = rmse / (true_nll.mean())
+                log_rmse = ((true_nll.log() - est_nll.log())**2).mean()**0.5
+                log_nrmse = rmse / (true_nll.log().mean())
+                params = {
+                    "hmm": hmm,
+                    "law": "bayesian_" + (law if not do_log_shots else f"{law} (log)"),
+                    "rmse": rmse.item(),
+                    "nrmse": nrmse.item(),
+                    "log_rmse": log_rmse.item(),
+                    "log_nrmse": log_nrmse.item(),
+                }
+                for key in more:
+                    if key == "priors": params[key] = more[key][0][0][hmm]
+                    elif key == "K": params[key] = more[key][0][0]
+                    else: params[key] = more[key][hmm]
+                params.update(metadata)
+                all_params.append(params)
+
+        # others
+        for law in power_law_mapping.keys():
+            torch.manual_seed(42 + i)
+            np.random.seed(42 + i)
+            model = fit_power_law(
+                subset_hmm[subset_hmm["shots"] <= max_shots], type=law, quiet=quiet,
+                patience=patience, epochs=epochs, lr=lr,
+            )
+            models[(law, hmm)] = model
+            est_nll = model(shots)
+            rmse = ((true_nll - est_nll)**2).mean()**0.5
+            nrmse = rmse / (true_nll.mean())
+            log_rmse = ((true_nll.log() - est_nll.log())**2).mean()**0.5
+            log_nrmse = rmse / (true_nll.log().mean())
+            params = {
+                "hmm": hmm,
+                "law": law,
+                "rmse": rmse.item(),
+                "nrmse": nrmse.item(),
+                "log_rmse": log_rmse.item(),
+                "log_nrmse": log_nrmse.item(),
+            }
+            params.update(model.get_params())
+            params.update(metadata)
+            all_params.append(params)
+
+    # done
+    return all_params, models
