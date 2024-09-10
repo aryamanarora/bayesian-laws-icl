@@ -10,26 +10,37 @@ import pandas as pd
 import os
 import datasets
 import argparse
+from together import Together
 
 # info about different models to simplify logit extraction
+# at position n, we get probability of token at n + 1
 model_info = {
-    "google/gemma-2b-it": {"start_of_turn": 106, "trigger": 2516, "user": 1645, "context_window": 4000},
-    "google/gemma-7b-it": {"start_of_turn": 106, "trigger": 2516, "user": 1645, "context_window": 4000},
-    "google/gemma-1.1-2b-it": {"start_of_turn": 106, "trigger": 2516, "user": 1645, "context_window": 4000},
-    "google/gemma-1.1-7b-it": {"start_of_turn": 106, "trigger": 2516, "user": 1645, "context_window": 4000},
-    "google/gemma-2-2b-it": {"start_of_turn": 106, "trigger": 2516, "user": 1645, "context_window": 4000},
-    "google/gemma-2-7b-it": {"start_of_turn": 106, "trigger": 2516, "user": 1645, "context_window": 4000},
-    "Qwen/Qwen2-0.5B-Instruct": {"start_of_turn": 151644, "trigger": 77091, "user": 872, "context_window": 16384},
-    "Qwen/Qwen2-1.5B-Instruct": {"start_of_turn": 151644, "trigger": 77091, "user": 872, "context_window": 16384},
+    "google/gemma-2b-it": {"start_of_turn": "<start_of_turn>", "trigger": "model", "offset": 2, "context_window": 4000},
+    "google/gemma-7b-it": {"start_of_turn": "<start_of_turn>", "trigger": "model", "offset": 2, "context_window": 4000},
+    "google/gemma-1.1-2b-it": {"start_of_turn": "<start_of_turn>", "trigger": "model", "offset": 2, "context_window": 4000},
+    "google/gemma-1.1-7b-it": {"start_of_turn": "<start_of_turn>", "trigger": "model", "offset": 2, "context_window": 4000},
+    "google/gemma-2-2b-it": {"start_of_turn": "<start_of_turn>", "trigger": "model", "offset": 2, "context_window": 4000},
+    "google/gemma-2-7b-it": {"start_of_turn": "<start_of_turn>", "trigger": "model", "offset": 2, "context_window": 4000},
+    "Qwen/Qwen2-0.5B-Instruct": {"start_of_turn": "<|im_start|>", "trigger": "assistant", "offset": 2, "context_window": 16384},
+    "Qwen/Qwen2-1.5B-Instruct": {"start_of_turn": "<|im_start|>", "trigger": "assistant", "offset": 2, "context_window": 16384},
+}
+
+# together models
+# at position n, we get probability of token at n
+# e.g. '<|start_header_id|>', 'system', '<|end_header_id|>', '\n\n'
+model_info_together = {
+    "meta-llama/Meta-Llama-3.1-405B-Instruct-Turbo": {
+        "start_of_turn": "<|start_header_id|>", "trigger": "assistant", "offset": 4, "context_window": 8192, "tokenizer": "meta-llama/Meta-Llama-3.1-405B-Instruct"
+    },
 }
 
 dataset_info = {
-    "creak": {"end_pos": 2},
-    "logiqa": {"end_pos": 2},
-    "harmbench": {"end_pos": 4},
-    "evals/persona/psychopathy": {"end_pos": 2},
-    "evals/persona/machiavellianism": {"end_pos": 2},
-    "evals/persona/narcissism": {"end_pos": 2},
+    "creak": {"end_pos": 1},
+    "logiqa": {"end_pos": 1},
+    "harmbench": {"end_pos": 3},
+    "evals/persona/psychopathy": {"end_pos": 1},
+    "evals/persona/machiavellianism": {"end_pos": 1},
+    "evals/persona/narcissism": {"end_pos": 1},
 }
 
 ## DATASET PREPROCESSING AND LOADING
@@ -102,33 +113,60 @@ def top_vals(tokenizer: AutoTokenizer, res: torch.Tensor, n: int=10, return_resu
     if return_results:
         return ret
 
+def print_gpu_stats():
+    if torch.cuda.is_available():
+        # Get the current GPU device
+        gpu_id = torch.cuda.current_device()
+        
+        # Print the allocated and reserved memory
+        print(f"Memory allocated on GPU {gpu_id}: {torch.cuda.memory_allocated(gpu_id) / 1024 ** 2:.2f} MB")
+        print(f"Memory reserved on GPU {gpu_id}: {torch.cuda.memory_reserved(gpu_id) / 1024 ** 2:.2f} MB")
+    else:
+        print("No GPU available")
+    
+@torch.inference_mode()
 def get_logits(
-    inputs: dict,
-    model: AutoModelForCausalLM,
-    poses: list | torch.Tensor,
-    mode: str="harmbench",
-    tokenizer: AutoTokenizer | None=None
+    tokens: torch.Tensor | list,
+    logprobs: torch.Tensor | list,
+    model_name: str="google/gemma-2b-it",
+    dataset: str="harmbench",
+    logits: bool=False,
+    token_ids: torch.Tensor | list | None=None,
 ) -> list:
-    """Get logit values for some prefix of each response in a multi-turn prompt."""
-    torch.cuda.empty_cache()
+    # get model info
+    info = None
+    if model_name in model_info:
+        info = model_info[model_name]
+    elif model_name in model_info_together:
+        info = model_info_together[model_name]
+    else:
+        raise ValueError("Model not supported")
+    offset = dataset_info[dataset]["end_pos"]
+
+    # find important positions
     data = []
-    out = model(**inputs)
-    offset = dataset_info[mode]["end_pos"]
-    for p, pos in enumerate(poses):
-        cur_pos = pos[1]
-        prob = 0
-        end_pos = cur_pos + offset
-        for k in range(cur_pos + 1, end_pos):
-            next_tok = inputs["input_ids"][0, k + 1]
-            # print(format_token(tokenizer, inputs["input_ids"][0, k]), " -> ", format_token(tokenizer, next_tok))
-            probs = out.logits[0, k].log_softmax(-1)
-            prob -= probs[next_tok]
-        data.append({
-            "shots": p,
-            # "tokens": (cur_pos + 1).item(),
-            "nll": prob.item(),
-            "model": model.config._name_or_path,
-        })
+    shots = 0
+    for i, tok in enumerate(tokens):
+        if tok == info["start_of_turn"] and tokens[i + 1] == info["trigger"]:
+            start_pos = i + info["offset"]
+            end_pos = i + info["offset"] + offset
+            if logits:
+                nll = 0
+                for s in range(start_pos, end_pos):
+                    # print(s, tokens[s], '->', tokens[s + 1])
+                    nll -= logprobs[s].log_softmax(dim=-1)[token_ids[s + 1]]
+            else:
+                # for s in range(start_pos, end_pos):
+                #     print(s, tokens[s])
+                nll = -sum(logprobs[start_pos:end_pos])
+            prob = math.exp(-nll)
+            data.append({
+                "shots": shots,
+                "nll": nll.item() if isinstance(nll, torch.Tensor) else nll,
+                "prob": prob.item() if isinstance(prob, torch.Tensor) else prob,
+                "model": model_name,
+            })
+            shots += 1
     return data
 
 # MODEL LOADING
@@ -143,7 +181,7 @@ def load_model(model_name: str="google/gemma-2b-it") -> tuple[AutoModelForCausal
         model_kwargs = {
             "torch_dtype": torch.bfloat16,
             "device_map": device,
-            "attn_implementation": "flash_attention_2",
+            # "attn_implementation": "flash_attention_2",
             # "load_in_8bit": True,
         }
         tokenizer = AutoTokenizer.from_pretrained(model_name) # same tokenizer necessary
@@ -155,45 +193,109 @@ def load_model(model_name: str="google/gemma-2b-it") -> tuple[AutoModelForCausal
 def test_model(
     model: AutoModelForCausalLM,
     tokenizer: AutoTokenizer,
-    evals: list=["evals/persona/psychopathy", "evals/persona/machiavellianism", "evals/persona/narcissism"]
+    evals: list=["evals/persona/psychopathy", "evals/persona/machiavellianism", "evals/persona/narcissism"],
+    ct: int=50,
+    shots: int=1000,
 ) -> list:
     model_name = model.config._name_or_path
     data = []
     for dataset in evals:
         qa_pairs = load_dataset(dataset)
         print(len(qa_pairs))
-        
-        # compute NLL
-        ct = 50
-        shots = 1000
-        trigger = model_info[model_name]["trigger"]
-        user = model_info[model_name]["user"]
         for _ in tqdm(range(ct)):
             random.shuffle(qa_pairs)
             question, answer = qa_pairs[0]
             for hmm in range(len(answer)):
+                # construct the many-shot prompt
                 chat = []
-                for j in range(shots):
+                for j in range(min(shots, len(qa_pairs))):
                     chat.append({"role": "user", "content": qa_pairs[j][0]})
                     chat.append({"role": "assistant", "content": qa_pairs[j][1][hmm]})
                     new_inputs = tokenizer.apply_chat_template(chat, tokenize=False, add_generation_prompt=False)
-                    new_inputs = tokenizer(new_inputs, return_tensors="pt").to(device)
+                    new_inputs = tokenizer(new_inputs, return_tensors="pt")
                     if new_inputs["input_ids"].shape[-1] > model_info[model_name]["context_window"]:
                         break
                     inputs = new_inputs
                 if _ == 0:
+                    # store example for debugging
                     text = tokenizer.decode(inputs["input_ids"][0])
                     path = f"logs/real-lms/{model_name.replace('/', '_')}___{dataset.replace('/', '_')}___example.txt"
                     with open(path, "w") as f:
                         f.write(text)
+                
+                # get logits and preprocess
+                inputs.to(device)
+                torch.cuda.empty_cache()
+                logits = model(**inputs).logits[0].to("cpu")
+                tokens = list(map(lambda x: tokenizer.decode(x), inputs["input_ids"][0]))
                     
-                poses = (inputs["input_ids"] == trigger).nonzero()
-                more_data = get_logits(inputs, model, poses, mode=dataset, tokenizer=tokenizer)
+                # now get the data
+                more_data = get_logits(tokens, logits, model_name=model_name, dataset=dataset, logits=True, token_ids=inputs["input_ids"][0])
                 for d in more_data:
                     d["hmm"] = hmm
                     d["dataset"] = dataset
                 data.extend(more_data)
     return data
+
+def test_model_together(
+    model_name: str,
+    tokenizer: AutoTokenizer,
+    evals: list=["evals/persona/psychopathy", "evals/persona/machiavellianism", "evals/persona/narcissism"],
+    ct: int=50,
+    shots: int=1000,
+) -> list:
+    client = Together(api_key=os.environ.get("TOGETHER_API_KEY"))
+    data = []
+    for dataset in evals:
+        # load dataset
+        qa_pairs = load_dataset(dataset)
+        print(len(qa_pairs))
+
+        # construct prompt and get logprobs
+        for _ in tqdm(range(ct)):
+            random.shuffle(qa_pairs)
+            question, answer = qa_pairs[0]
+            for hmm in range(len(answer)):
+                # construct the many-shot prompt
+                chat = []
+                for j in range(min(shots, len(qa_pairs))):
+                    chat.append({"role": "user", "content": qa_pairs[j][0]})
+                    chat.append({"role": "assistant", "content": qa_pairs[j][1][hmm]})
+                    new_inputs = tokenizer.apply_chat_template(chat, tokenize=False, add_generation_prompt=False)
+                    new_inputs = tokenizer(new_inputs, return_tensors="pt")
+                    if new_inputs["input_ids"].shape[-1] > model_info_together[model_name]["context_window"]:
+                        chat = chat[:-2]
+                        break
+                
+                # send to Together
+                result = client.chat.completions.create(
+                    model=model_name,
+                    messages=chat,
+                    stream=False,
+                    max_tokens=1,
+                    logprobs=1,
+                    echo=True,
+                )
+
+                # extract logprobs
+                tokens = result.prompt[0].logprobs.tokens
+                logprobs = result.prompt[0].logprobs.token_logprobs
+
+                # save example for debugging
+                if _ == 0:
+                    text = "".join(tokens)
+                    path = f"logs/real-lms/{model_name.replace('/', '_')}___{dataset.replace('/', '_')}___example.txt"
+                    with open(path, "w") as f:
+                        f.write(text)
+                    
+                # now get the data
+                more_data = get_logits(tokens, logprobs, model_name=model_name, dataset=dataset)
+                for d in more_data:
+                    d["hmm"] = hmm
+                    d["dataset"] = dataset
+                data.extend(more_data)
+    return data
+    
 
 @torch.inference_mode()
 def main(
@@ -216,12 +318,17 @@ def main(
             print(f"Running: {model_name} on {dataset}")
 
             # load model and collect data
-            if model is None:
-                model, tokenizer = load_model(model_name)
-            data = test_model(model, tokenizer, evals=[dataset])
+            if  model_name in model_info:
+                if model is None:
+                    model, tokenizer = load_model(model_name)
+                data = test_model(model, tokenizer, evals=[dataset])
+            elif model_name in model_info_together:
+                tokenizer = AutoTokenizer.from_pretrained(model_info_together[model_name]["tokenizer"])
+                data = test_model_together(model_name, tokenizer, evals=[dataset])
 
             # assemble data
             df = pd.DataFrame(data)
+            print(df)
             df["prob"] = df["nll"].map(lambda x: math.exp(-x))
             df["shots"] += 1
             print(len(df))
