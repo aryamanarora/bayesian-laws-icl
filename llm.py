@@ -32,6 +32,9 @@ model_info_together = {
     "meta-llama/Meta-Llama-3.1-405B-Instruct-Turbo": {
         "start_of_turn": "<|start_header_id|>", "trigger": "assistant", "offset": 4, "context_window": 8192, "tokenizer": "meta-llama/Meta-Llama-3.1-405B-Instruct"
     },
+    "meta-llama/Meta-Llama-3.1-70B-Instruct-Turbo": {
+        "start_of_turn": "<|start_header_id|>", "trigger": "assistant", "offset": 4, "context_window": 8192, "tokenizer": "meta-llama/Meta-Llama-3.1-70B-Instruct"
+    },
 }
 
 dataset_info = {
