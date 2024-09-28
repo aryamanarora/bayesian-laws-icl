@@ -61,7 +61,7 @@ class PowerLawFit(torch.nn.Module):
         return est_nll
 
     def estimate_nll(self, max_shots: int, hmm: int=None):
-        shots = torch.tensor(range(1, max_shots), dtype=torch.float32).to(DEVICE)
+        shots = torch.tensor(range(max_shots), dtype=torch.float32).to(DEVICE)
         return self(shots)
 
 
@@ -114,7 +114,7 @@ class BoundedPowerLawFit(torch.nn.Module):
         return est_nll
 
     def estimate_nll(self, max_shots: int, hmm: int=None):
-        shots = torch.tensor(range(1, max_shots), dtype=torch.float32).to(DEVICE)
+        shots = torch.tensor(range(max_shots), dtype=torch.float32).to(DEVICE)
         return self(shots)
 
 
@@ -179,8 +179,140 @@ class LogisticLawFit(torch.nn.Module):
         return est_nll
 
     def estimate_nll(self, max_shots: int, hmm: int=None):
-        shots = torch.tensor(range(1, max_shots), dtype=torch.float32).to(DEVICE)
+        shots = torch.tensor(range(max_shots), dtype=torch.float32).to(DEVICE)
         return self(shots)
+
+
+class BayesianLawFitOld(torch.nn.Module):
+    def __init__(self, num_hmms, sft_amounts=None, do_log_shots=False):
+        super(BayesianLawFitOld, self).__init__()
+        self.do_log_shots = do_log_shots
+        self.num_hmms = num_hmms
+        self.masks = torch.eye(num_hmms, dtype=torch.bool).to(DEVICE)
+        if sft_amounts is not None:
+            self.sft_amount_d = {sft: i for i, sft in enumerate(sft_amounts)}
+            self.sft_amounts = np.vectorize(self.sft_amount_d.get)
+        else:
+            sft_amounts = [0]
+        self.priors = torch.nn.Parameter(torch.zeros(len(sft_amounts), num_hmms))
+        self.priors.data[:, 0] = -10.0 
+        self.P = torch.nn.Parameter((torch.eye(num_hmms, num_hmms) * 10) - 5)
+        self.K = torch.nn.Parameter(torch.zeros(len(sft_amounts)))
+    
+    def get_prior(self, sft_amount=None):
+        return torch.nn.functional.softmax(self.priors[sft_amount], dim=-1)
+
+    def get_P(self):
+        return torch.sigmoid(self.P)
+    
+    def get_K(self, sft_amount=None):
+        return torch.exp(self.K[sft_amount])
+
+    def get_params(self):
+        params = {
+            "priors": self.get_prior().tolist(),
+            "K": self.get_K().tolist(),
+        }
+        P = self.get_P()
+        for i, row in enumerate(P):
+            params[f"P_{i}"] = row.tolist()
+        return params
+
+    def get_p_under_dist(self, hmm):
+        P = self.get_P().log()
+        p_under_dist = P[hmm]
+        return p_under_dist
+
+    def forward(self, shots, hmm, sft_amount=[0], add_metrics=False):
+        priors = self.get_prior(sft_amount).log()
+        K = self.get_K(sft_amount)
+        if self.do_log_shots:
+            shots = shots.log()
+        shots = shots * K
+        if isinstance(shots, torch.Tensor):
+            shots = shots.unsqueeze(-1)
+        # print("hmm:", hmm)
+        # print("K:", self.K.item())
+        # print("p(hmm):", priors.exp().tolist())
+        p_under_dist = self.get_p_under_dist(hmm)
+        # print("p(d | hmm):", p_under_dist.exp().tolist())
+        p_seq_under_dist = p_under_dist * shots
+        # print("p(D | hmm):", p_seq_under_dist.exp().tolist())
+        posteriors = torch.nn.functional.softmax(priors + p_seq_under_dist, dim=-1) # already in log space
+        # print("p(hmm | D):", posteriors.tolist())
+        p_data = (posteriors * p_under_dist.exp()).sum(dim=-1)
+        # print("p(d | D, hmm):", (posteriors * p_under_dist.exp()).tolist())
+        # print("p(d | D):", p_data.item())
+        est_nll = -torch.log(p_data)
+        # print("NLL:", nll, est_nll.item())
+        # input()
+        if add_metrics:
+            return {
+                "nll": est_nll,
+                "posteriors": posteriors,
+            }
+        return est_nll
+
+    def estimate_nll(self, max_shots: int, hmm: int=None):
+        shots = torch.tensor(range(max_shots), dtype=torch.float32).to(DEVICE)
+        hmm = torch.zeros_like(shots, dtype=torch.int32).fill_(hmm).to(DEVICE)
+        return self(shots, hmm)
+
+
+class BayesianLawSamplingFitOld(BayesianLawFitOld):
+    def __init__(self, num_hmms, sft_amounts=None, do_log_shots=False):
+        super(BayesianLawSamplingFitOld, self).__init__(num_hmms, sft_amounts, do_log_shots)
+        self.gammas = torch.nn.Parameter(torch.zeros(num_hmms) + 5)
+        self.betas = torch.nn.Parameter(torch.zeros(num_hmms) - 5)
+    
+    def get_gammas(self):
+        return torch.sigmoid(self.gammas)
+
+    def get_betas(self):
+        return torch.sigmoid(self.betas) * torch.sigmoid(self.gammas)
+    
+    def get_params(self):
+        return {
+            "priors": self.get_prior().tolist(),
+            "gammas": self.get_gammas().tolist(),
+            "betas": self.get_betas().tolist(),
+            "K": self.get_K().tolist(),
+        }
+
+    def get_p_under_dist(self, hmm):
+        gammas = self.get_gammas().log()
+        betas = self.get_betas().log()
+        p_under_dist = torch.where(self.masks[hmm], gammas, betas)
+        return p_under_dist
+
+
+class BayesianLawScoringFitOld(BayesianLawFitOld):
+    def __init__(self, num_hmms, sft_amounts=None, do_log_shots=False):
+        super(BayesianLawScoringFitOld, self).__init__(num_hmms, sft_amounts, do_log_shots)
+        self.gammas = torch.nn.Parameter(torch.zeros(num_hmms) + 5)
+        self.betas = torch.nn.Parameter(torch.zeros(num_hmms) - 5)
+
+    def get_gammas(self):
+        return torch.sigmoid(self.gammas)
+
+    def get_betas(self):
+        return torch.sigmoid(self.betas) * torch.sigmoid(self.gammas)
+
+    def get_params(self):
+        return {
+            "priors": self.get_prior().tolist(),
+            "gammas": self.get_gammas().tolist(),
+            "betas": self.get_betas().tolist(),
+            "K": self.get_K().tolist(),
+        }
+
+    def get_p_under_dist(self, hmm):
+        gammas = self.get_gammas().log()
+        betas = self.get_betas().log()
+        gammas = gammas[hmm].unsqueeze(1).repeat(1, self.num_hmms)
+        betas = betas[hmm].unsqueeze(1).repeat(1, self.num_hmms)
+        p_under_dist = self.masks[hmm] * (gammas - betas) + betas
+        return p_under_dist
     
 
 class BayesianLawFit(torch.nn.Module):
@@ -225,21 +357,26 @@ class BayesianLawFit(torch.nn.Module):
         # get params
         priors = self.get_prior(sft_amount)
         K = self.get_K(sft_amount)
-        if self.do_log_shots:
-            shots = shots.log()
         if isinstance(shots, torch.Tensor):
             shots = shots.unsqueeze(-1)
+        if self.do_log_shots:
+            shots = shots.log()
         # compute entirely in log space
         p_under_dist = self.get_p_under_dist(hmm)
         denominator = priors + p_under_dist * (shots * K)
         numerator = priors + p_under_dist * (shots * K + 1)
         est_nll = -(torch.logsumexp(numerator, dim=-1) - torch.logsumexp(denominator, dim=-1))
+        if add_metrics:
+            return {
+                "nll": est_nll,
+                "posteriors": F.softmax(denominator, dim=-1),
+            }
         return est_nll
 
-    def estimate_nll(self, max_shots: int, hmm: int=None):
-        shots = torch.tensor(range(1, max_shots), dtype=torch.float32).to(DEVICE)
+    def estimate_nll(self, max_shots: int, hmm: int=None, add_metrics=False):
+        shots = torch.tensor(range(max_shots), dtype=torch.float32).to(DEVICE)
         hmm = torch.zeros_like(shots, dtype=torch.int32).fill_(hmm).to(DEVICE)
-        return self(shots, hmm)
+        return self(shots, hmm, add_metrics=add_metrics)
 
 
 class BayesianLawSamplingFit(BayesianLawFit):
@@ -312,6 +449,7 @@ bayesian_law_mapping = {
     "original": BayesianLawFit,
     "sampling": BayesianLawSamplingFit,
     "scoring": BayesianLawScoringFit,
+    # "old": BayesianLawSamplingFitOld,
 }
 
 
@@ -321,7 +459,7 @@ huber_loss = torch.nn.HuberLoss(delta=1.0)
 def compute_loss(
     true_nll: torch.Tensor,
     est_nll: torch.Tensor,
-    mode: str="mse_log",
+    mode: str="mse_prob",
 ):
     loss = None
     if mode == "mse_log":
@@ -352,17 +490,19 @@ def fit_law(
     do_log_shots: bool=False,
     loss_mode: str="mse_log",
     sweep: bool=False,
+    bayesian_laws: dict=bayesian_law_mapping,
+    power_laws: dict=power_law_mapping,
 ):
     # set up model
     def init_model():
-        if law in power_law_mapping.keys():
+        if law in power_laws.keys():
             # power law
-            model = power_law_mapping[law]()
+            model = power_laws[law]()
             model.to(DEVICE)
-        elif law in bayesian_law_mapping.keys():
+        elif law in bayesian_laws.keys():
             # bayesian law
             sft_amounts = None if not sft_amount else list(subset['sft_amount'].unique())
-            model = bayesian_law_mapping[law](num_hmms, sft_amounts, do_log_shots)
+            model = bayesian_laws[law](num_hmms, sft_amounts, do_log_shots)
             model.to(DEVICE)
         return model
     model = init_model()
@@ -419,7 +559,7 @@ def fit_law(
                 "num_hmms": num_hmms,
                 "do_log_shots": do_log_shots,
             }
-            if law in bayesian_law_mapping.keys():
+            if law in bayesian_laws.keys():
                 init["sft_amounts"] = sft_amounts
             init_vars = list(model.get_params().keys())
             sweep_vals = [-1.0, 0.0, 1.0]
@@ -431,7 +571,7 @@ def fit_law(
             if sweep:
                 sweep_params = {k: v for k, v in zip(init_vars, init_vals)}
                 sweep_params.update(init)
-                model = bayesian_law_mapping[law](**sweep_params) if law in bayesian_law_mapping else power_law_mapping[law]()
+                model = bayesian_laws[law](**sweep_params) if law in bayesian_laws else power_laws[law]()
                 model.to(DEVICE)
 
             # set up optim
@@ -535,7 +675,6 @@ def eval_fit(
     nrmse_prob = rmse_prob / (true_prob.mean())
     params = {
         "hmm": hmm,
-        "law": ("bayesian_" if law in bayesian_law_mapping else "") + (law if not do_log_shots else f"{law} (log)"),
         "rmse": rmse.item(),
         "nrmse": nrmse.item(),
         "log_rmse": log_rmse.item(),
@@ -560,6 +699,8 @@ def compute_all_fits(
     loss_mode: str="mse_log",
     log_shots: bool=False,
     sweep: bool=False,
+    power_laws: dict=power_law_mapping,
+    bayesian_laws: dict=bayesian_law_mapping,
 ) -> tuple:
     """
     Compute all of the fits for a given subset of the data.
@@ -589,7 +730,7 @@ def compute_all_fits(
     torch.manual_seed(42 + i)
     np.random.seed(42 + i)
     for do_log_shots in log_shots:
-        for law in bayesian_law_mapping.keys():
+        for law in bayesian_laws.keys():
             law_name = law if not do_log_shots else f"{law} (log)"
             if not quiet:
                 print(f"Fitting {law_name}...")
@@ -597,7 +738,7 @@ def compute_all_fits(
                 law=law, subset=subset[subset["shots"] <= max_shots], sft_amount=False,
                 quiet=quiet, num_hmms=num_hmms, patience=patience, epochs=epochs,
                 lr=lr, do_log_shots=do_log_shots, mode=mode, loss_mode=loss_mode,
-                sweep=sweep,
+                sweep=sweep, bayesian_laws=bayesian_laws, power_laws=power_laws,
             )
             models[law_name] = bayesian_model
 
@@ -614,7 +755,7 @@ def compute_all_fits(
         
         # bayesian
         for do_log_shots in log_shots:
-            for law in bayesian_law_mapping.keys():
+            for law in bayesian_laws.keys():
                 bayesian_model = models[law if not do_log_shots else f"{law} (log)"]
                 more = bayesian_model.get_params()
 
@@ -624,6 +765,7 @@ def compute_all_fits(
                     true_nll=true_nll, true_prob=true_prob, hmm=hmm,
                     do_log_shots=do_log_shots,
                 )
+                params["law"] = "bayesian_" + law
                 for key in more:
                     if key == "priors": params[key] = more[key][0][0][hmm]
                     elif key == "K": params[key] = more[key][0][0]
@@ -632,14 +774,14 @@ def compute_all_fits(
                 all_params.append(params)
 
         # others
-        for law in power_law_mapping.keys():
+        for law in power_laws.keys():
             # fit
             torch.manual_seed(42 + i)
             np.random.seed(42 + i)
             model = fit_law(
                 law=law, subset=subset_hmm[subset_hmm["shots"] <= max_shots], quiet=quiet,
                 patience=patience, epochs=epochs, lr=lr, mode=mode, loss_mode=loss_mode,
-                sweep=sweep,
+                sweep=sweep, bayesian_laws=bayesian_laws, power_laws=power_laws,
             )
             models[(law, hmm)] = model
 
@@ -649,6 +791,7 @@ def compute_all_fits(
                 true_nll=true_nll, true_prob=true_prob, hmm=hmm,
                 do_log_shots=False,
             )
+            params["law"] = law
             params.update(model.get_params())
             params.update(metadata)
             all_params.append(params)
