@@ -23,6 +23,8 @@ model_info = {
     "google/gemma-2-7b-it": {"start_of_turn": "<start_of_turn>", "trigger": "model", "offset": 2, "context_window": 4000},
     "Qwen/Qwen2-0.5B-Instruct": {"start_of_turn": "<|im_start|>", "trigger": "assistant", "offset": 2, "context_window": 16384},
     "Qwen/Qwen2-1.5B-Instruct": {"start_of_turn": "<|im_start|>", "trigger": "assistant", "offset": 2, "context_window": 16384},
+    "meta-llama/Llama-3.2-1B-Instruct": {"start_of_turn": "<|start_header_id|>", "trigger": "assistant", "offset": 3, "context_window": 16000},
+    "meta-llama/Llama-3.2-3B-Instruct": {"start_of_turn": "<|start_header_id|>", "trigger": "assistant", "offset": 3, "context_window": 16000},
 }
 
 # together models
@@ -321,13 +323,15 @@ def main(
             print(f"Running: {model_name} on {dataset}")
 
             # load model and collect data
-            if  model_name in model_info:
+            if model_name in model_info:
                 if model is None:
                     model, tokenizer = load_model(model_name)
                 data = test_model(model, tokenizer, evals=[dataset])
             elif model_name in model_info_together:
                 tokenizer = AutoTokenizer.from_pretrained(model_info_together[model_name]["tokenizer"])
                 data = test_model_together(model_name, tokenizer, evals=[dataset])
+            else:
+                raise ValueError(f"model {model_name} not found in configs")
 
             # assemble data
             df = pd.DataFrame(data)
