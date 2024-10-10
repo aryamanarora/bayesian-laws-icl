@@ -23,8 +23,10 @@ model_info = {
     "google/gemma-2-7b-it": {"start_of_turn": "<start_of_turn>", "trigger": "model", "offset": 2, "context_window": 4000},
     "Qwen/Qwen2-0.5B-Instruct": {"start_of_turn": "<|im_start|>", "trigger": "assistant", "offset": 2, "context_window": 16384},
     "Qwen/Qwen2-1.5B-Instruct": {"start_of_turn": "<|im_start|>", "trigger": "assistant", "offset": 2, "context_window": 16384},
-    "meta-llama/Llama-3.2-1B-Instruct": {"start_of_turn": "<|start_header_id|>", "trigger": "assistant", "offset": 3, "context_window": 16000},
-    "meta-llama/Llama-3.2-3B-Instruct": {"start_of_turn": "<|start_header_id|>", "trigger": "assistant", "offset": 3, "context_window": 16000},
+    "meta-llama/Llama-3.2-1B-Instruct": {"start_of_turn": "<|start_header_id|>", "trigger": "assistant", "offset": 3, "context_window": 8000},
+    "meta-llama/Llama-3.2-3B-Instruct": {"start_of_turn": "<|start_header_id|>", "trigger": "assistant", "offset": 3, "context_window": 8000},
+    "meta-llama/Llama-3.1-8B-Instruct": {"start_of_turn": "<|start_header_id|>", "trigger": "assistant", "offset": 3, "context_window": 8000},
+    "meta-llama/Llama-3.1-8B": {"start_of_turn": "<|start_header_id|>", "trigger": "assistant", "offset": 3, "context_window": 8000},
 }
 
 # together models
@@ -46,6 +48,10 @@ dataset_info = {
     "evals/persona/psychopathy": {"end_pos": 1},
     "evals/persona/machiavellianism": {"end_pos": 1},
     "evals/persona/narcissism": {"end_pos": 1},
+}
+
+tokeniser_mapping = {
+    "meta-llama/Llama-3.1-8B": "meta-llama/Llama-3.1-8B-Instruct",
 }
 
 ## DATASET PREPROCESSING AND LOADING
@@ -189,7 +195,8 @@ def load_model(model_name: str="google/gemma-2b-it") -> tuple[AutoModelForCausal
             # "attn_implementation": "flash_attention_2",
             # "load_in_8bit": True,
         }
-        tokenizer = AutoTokenizer.from_pretrained(model_name) # same tokenizer necessary
+        tokenizer_name = model_name
+        tokenizer = AutoTokenizer.from_pretrained(tokenizer_name) # same tokenizer necessary
         model = AutoModelForCausalLM.from_pretrained(model_name, **model_kwargs)
         model.eval()
     return model, tokenizer
@@ -216,7 +223,11 @@ def test_model(
                 for j in range(min(shots, len(qa_pairs))):
                     chat.append({"role": "user", "content": qa_pairs[j][0]})
                     chat.append({"role": "assistant", "content": qa_pairs[j][1][hmm]})
-                    new_inputs = tokenizer.apply_chat_template(chat, tokenize=False, add_generation_prompt=False)
+                    if model_name in tokeniser_mapping:
+                        new_inputs = list(map(lambda turn: ("User" if turn["role"] == "user" else "Assistant") + ": " + turn["content"], chat))
+                        new_inputs = "\n\n".join(new_inputs)
+                    else:
+                        new_inputs = tokenizer.apply_chat_template(chat, tokenize=False, add_generation_prompt=False)
                     new_inputs = tokenizer(new_inputs, return_tensors="pt")
                     if new_inputs["input_ids"].shape[-1] > model_info[model_name]["context_window"]:
                         break
@@ -240,6 +251,9 @@ def test_model(
                     d["hmm"] = hmm
                     d["dataset"] = dataset
                 data.extend(more_data)
+            
+            # empty cache after each forward pass
+            torch.cuda.empty_cache()
     return data
 
 def test_model_together(
@@ -326,6 +340,9 @@ def main(
             if model_name in model_info:
                 if model is None:
                     model, tokenizer = load_model(model_name)
+                    print("torch.cuda.memory_allocated: %f"%(torch.cuda.memory_allocated(0)))
+                    print("torch.cuda.memory_reserved: %f"%(torch.cuda.memory_reserved(0)))
+                    print("torch.cuda.max_memory_reserved: %f"%(torch.cuda.max_memory_reserved(0)))
                 data = test_model(model, tokenizer, evals=[dataset])
             elif model_name in model_info_together:
                 tokenizer = AutoTokenizer.from_pretrained(model_info_together[model_name]["tokenizer"])
