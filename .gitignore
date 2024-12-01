@@ -15,3 +15,4 @@ train.txt
 tokenizer.json
 test.sh
 scratch/*
+*.ipynb

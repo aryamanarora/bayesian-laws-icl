@@ -44,7 +44,7 @@ echo $NUM_SFT_EXAMPLES
 if [ $SFT_METHOD == "sft" ] || [ $SFT_METHOD == "sft,dpo" ]; then
 
     # train with different amounts of SFT examples
-    nlprun -n $NUM_HIDDEN_LAYERS-pretrain-sft -g 1 "python train.py --num_hidden_layers $NUM_HIDDEN_LAYERS \
+    nlprun -n $NUM_HIDDEN_LAYERS-pretrain-sft -g 1 "uv run bayesian_laws_icl/train.py --num_hidden_layers $NUM_HIDDEN_LAYERS \
         --num_train_epochs $NUM_TRAIN_EPOCHS \
         --output_dir $NUM_HIDDEN_LAYERS-$PRETRAIN_DIST-$SFT_DIST \
         --num_train_examples $NUM_TRAIN_EXAMPLES \
@@ -56,7 +56,7 @@ if [ $SFT_METHOD == "sft" ] || [ $SFT_METHOD == "sft,dpo" ]; then
         $TRAINING_OPTS" -r $MEMORY$MACHINE
 
     # train SFT dist separately
-    nlprun -n $NUM_HIDDEN_LAYERS-sft-only -g 1 "python train.py --num_hidden_layers $NUM_HIDDEN_LAYERS \
+    nlprun -n $NUM_HIDDEN_LAYERS-sft-only -g 1 "uv run bayesian_laws_icl/train.py --num_hidden_layers $NUM_HIDDEN_LAYERS \
         --num_train_epochs $NUM_TRAIN_EPOCHS \
         --output_dir $NUM_HIDDEN_LAYERS-$SFT_DIST-$SFT_DIST \
         --num_train_examples $NUM_TRAIN_EXAMPLES \
@@ -71,7 +71,7 @@ fi
 
 if [ $SFT_METHOD == "dpo" ] || [ $SFT_METHOD == "sft,dpo" ]; then
 
-    nlprun -n $NUM_HIDDEN_LAYERS-pretrain-dpo -g 1 "python train.py --num_hidden_layers $NUM_HIDDEN_LAYERS \
+    nlprun -n $NUM_HIDDEN_LAYERS-pretrain-dpo -g 1 "uv run bayesian_laws_icl/train.py --num_hidden_layers $NUM_HIDDEN_LAYERS \
         --num_train_epochs $NUM_TRAIN_EPOCHS \
         --output_dir $NUM_HIDDEN_LAYERS-$PRETRAIN_DIST-$SFT_DIST-dpo \
         --load_dir logs/$NUM_HIDDEN_LAYERS-$PRETRAIN_DIST-$SFT_DIST \

@@ -5,7 +5,7 @@ from plotnine import (
     geom_tile, geom_text, geom_vline, coord_cartesian, coord_trans,
     theme_set, geom_area, facet_wrap
 )
-from plotnine.scales import scale_y_log10, scale_x_log10, scale_x_discrete, scale_y_reverse, scale_fill_cmap, scale_y_continuous
+from plotnine.scales import scale_y_log10, scale_x_log10, scale_x_discrete, scale_y_reverse, scale_fill_cmap, scale_y_continuous, scale_color_cmap
 import os
 import torch
 import numpy as np
@@ -130,17 +130,79 @@ format_data(pretrain_data)
 
 # ICL plots (no fits)
 
-plot = (
-    ggplot(format_data(pretrain_data), aes(x="Tokens", y="Accuracy", color="Ex. length", group="Ex. length")) +
-    stat_summary(geom="line") + facet_grid("~Model") + theme(figure_size=(7, 2.5))
-)
-plot.save('paper/icl_curve.pdf', width=7, height=2.5)
+# plot = (
+#     ggplot(format_data(pretrain_data), aes(x="Tokens", y="Accuracy", color="Ex. length", group="Ex. length")) +
+#     stat_summary(geom="line") + facet_grid("~Model") + theme(figure_size=(7, 2.5))
+# )
+# plot.save('paper/icl_curve.pdf', width=7, height=2.5)
+
+# plot = (
+#     ggplot(format_data(pretrain_data), aes(x="Tokens", y="Accuracy", color="Ex. length", group="Ex. length")) +
+#     geom_line() + facet_grid("Model~HMM") + theme(figure_size=(7, 7))
+# )
+# plot.save('paper/icl_curve_hmm.pdf', width=7, height=7)
+
+# plot shots vs. prob, faceted by layers, and only for pretrain
 
 plot = (
-    ggplot(format_data(pretrain_data), aes(x="Tokens", y="Accuracy", color="Ex. length", group="Ex. length")) +
-    geom_line() + facet_grid("Model~HMM") + theme(figure_size=(7, 7))
+    ggplot(format_data(pretrain_data[pretrain_data["layers"] >= 3]), aes(x="Shots", y="Probability", color="Model")) +
+    facet_grid("Ex. length~HMM", labeller="label_both") +
+    geom_line() + scale_x_log10() 
 )
-plot.save('paper/icl_curve_hmm.pdf', width=7, height=7)
+plot.save('paper/shots_v_prob.pdf', width=8, height=8)
+
+sft_data = deepcopy(data)
+sft_data["tokens"] = sft_data["shots"] * (sft_data["k"] + 1)
+# sft_data['k'] = sft_data['k'].astype(str)
+
+sft_df = pd.DataFrame(sft_data)
+sft_df = sft_df.groupby(["shots", "k", "hmm", "sft", "sft_amount", "layers", "tokens"]).mean().reset_index()
+sft_df["nll_avg"] = sft_df["nll"]
+sft_df["nll"] = sft_df["prob"].map(lambda x: -math.log(x))
+sft_df = sft_df[sft_df["layers"] >= 3]
+
+for K in sft_df["k"].unique():
+    temp = sft_df[sft_df["k"] == K]
+    plot = (
+        ggplot(format_data(temp), aes(x="Shots", y="Probability", color="# SFT examples", group="# SFT examples")) +
+        facet_grid("Model~HMM", labeller="label_both") +
+        geom_line() + scale_x_log10() +
+        scale_color_cmap(trans="log10")
+    )
+    plot.save(f'paper/shots_v_prob_sft_{K}.pdf', width=8, height=8)
+
+dpo_datas = []
+for layers in [1, 2, 3, 4, 8, 12, 16]:
+    file = f"logs/{layers}-1,1,1,1,1-1,0,0,0,0-dpo/in_context_probs.csv"
+    if not os.path.exists(file): continue
+    dpo_data = pd.read_csv(file)
+    dpo_data['shots'] = dpo_data['shots'] + 1
+    dpo_data['layers'] = layers
+    dpo_datas.append(dpo_data)
+dpo_df = pd.concat(dpo_datas)
+
+filter = (dpo_df['sft_amount'] == -1)
+for layers in dpo_df['layers'].unique():
+    for sft_amount in dpo_df['sft_amount'].unique():
+        maxi = dpo_df[(dpo_df['layers'] == layers) & (dpo_df['sft_amount'] == sft_amount)]['sft'].max()
+        filter |= ((dpo_df['sft'] == maxi) & (dpo_df['layers'] == layers) & (dpo_df['sft_amount'] == sft_amount)) 
+dpo_df = dpo_df[filter]
+# add pretrain data
+dpo_df = pd.concat([pretrain_data, dpo_df])
+dpo_df['dpo_amount'] = dpo_df['sft_amount']
+dpo_df = dpo_df[dpo_df["layers"] >= 3]
+
+for K in dpo_df["k"].unique():
+    temp = dpo_df[dpo_df["k"] == K]
+    plot = (
+        ggplot(format_data(temp), aes(x="Shots", y="Probability", color="# DPO examples", group="# DPO examples")) +
+        facet_grid("Model~HMM", labeller="label_both") +
+        geom_line() + scale_x_log10() +
+        scale_color_cmap(trans="log10")
+    )
+    plot.save(f'paper/shots_v_prob_dpo_{K}.pdf', width=8, height=8)
+
+exit(0)
 
 # Bayesian law fits
 
@@ -211,7 +273,7 @@ def bold_min(row):
 # table fmt
 average_nrmse = average_nrmse.apply(bold_min, axis=1)
 latex_table = average_nrmse.to_latex(escape=False)
-latex_table = latex_table.replace('_', '\\_').replace('\cline{1-8}', '\midrule')
+latex_table = latex_table.replace('_', '\\_').replace('\\cline{1-8}', '\\midrule')
 print(latex_table)
 
 extrap = df[(df["perc"] < 1)].groupby(['perc', 'law'])['nrmse_prob'].mean().reset_index()
@@ -332,7 +394,7 @@ for layers in params_df["layers"].unique():
         for val in vals:
             print(f" & {val:.4f}" if val != mini else f" & \\textbf{{{val:.4f}}}", end='')
         print(' \\\\')
-    print('\midrule')
+    print('\\midrule')
         
 
 bayesian_df = format_data(params_df)
@@ -531,7 +593,7 @@ def bold_min(row):
 # table fmt
 average_nrmse = average_nrmse.apply(bold_min, axis=1)
 latex_table = average_nrmse.to_latex(escape=False)
-latex_table = latex_table.replace('_', '\\_').replace('\cline{1-8}', '\midrule')
+latex_table = latex_table.replace('_', '\\_').replace('\\cline{1-8}', '\\midrule')
 print(latex_table)
 
 # DPO
@@ -665,7 +727,7 @@ def bold_min(row):
 # table fmt
 average_nrmse = average_nrmse.apply(bold_min, axis=1)
 latex_table = average_nrmse.to_latex(escape=False)
-latex_table = latex_table.replace('_', '\\_').replace('\cline{1-8}', '\midrule')
+latex_table = latex_table.replace('_', '\\_').replace('\\cline{1-8}', '\\midrule')
 print(latex_table)
 
 # LLMs
@@ -739,7 +801,7 @@ def bold_min(row):
 # table fmt
 average_nrmse = average_nrmse.apply(bold_min, axis=1)
 latex_table = average_nrmse.to_latex(escape=False)
-latex_table = latex_table.replace('_', '\\_').replace('\cline{1-8}', '\midrule')
+latex_table = latex_table.replace('_', '\\_').replace('\\cline{1-8}', '\\midrule')
 print(latex_table)
 
 average_nrmse = params_llm_df.copy()
@@ -748,7 +810,7 @@ average_nrmse = average_nrmse.groupby(['model', 'dataset', 'law'])['nrmse_prob']
 # table fmt
 average_nrmse = average_nrmse.apply(bold_min, axis=1)
 latex_table = average_nrmse.to_latex(escape=False)
-latex_table = latex_table.replace('_', '\\_').replace('\cline{1-8}', '\midrule')
+latex_table = latex_table.replace('_', '\\_').replace('\\cline{1-8}', '\\midrule')
 print(latex_table)
 
 average_nrmse = params_llm_df.copy()
@@ -757,7 +819,7 @@ average_nrmse = average_nrmse.groupby(['model', 'dataset', 'law'])['nrmse_prob']
 # table fmt
 # average_nrmse = average_nrmse.apply(bold_min, axis=1)
 latex_table = average_nrmse.to_latex(escape=True)
-latex_table = latex_table.replace('\cline{1-8}', '\midrule')
+latex_table = latex_table.replace('\\cline{1-8}', '\\midrule')
 print(latex_table)
 
 extrap = params_llm_df.groupby(['dataset', 'model', 'hmm', 'law'])['nrmse_prob'].mean().unstack().reset_index()
