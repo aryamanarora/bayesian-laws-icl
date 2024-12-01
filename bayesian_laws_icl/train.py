@@ -11,6 +11,7 @@ from data import HMMDataset, MixtureOfHmms, HMMInContextDataset, HMMPreferenceDa
 from dataclasses import asdict
 from tqdm import tqdm
 from trainer import ModelArguments, DataArguments, TrainingArguments, SFTTrainer, DPOTrainer, DataCollator, in_context_eval
+from calflops import calculate_flops
 
 device = "cpu" if not torch.cuda.is_available() else "cuda"
 
@@ -94,6 +95,36 @@ def train():
         # data
         train_dataset = None
         if model_args.do_pretrain:
+            # set up model
+            config = transformers.CONFIG_MAPPING[model_args.model_type](
+                vocab_size=data_args.num_emissions + 2,
+                num_hidden_layers=model_args.num_hidden_layers,
+                num_attention_heads=12,
+                num_key_value_heads=12,
+                hidden_size=768,
+                max_position_embeddings=1024,
+            )
+            if model_args.model_type == "llama":
+                config.intermediate_size = 4 * 768
+                config.tie_word_embeddings = True
+            print(config)
+            model = transformers.AutoModelForCausalLM.from_config(config)
+
+            # calculate flops
+            eff_bs = training_args.per_device_train_batch_size * training_args.gradient_accumulation_steps
+            flops, macs, params = calculate_flops(
+                model=model,
+                input_shape=(eff_bs, 1024),
+                transformer_tokenizer=hmms.tokenizer,
+                output_as_string=False,
+            )
+            print(f"Single forward pass FLOPs: {flops / (10**12):.3f}T")
+            total_flops = float(flops) * training_args.num_train_epochs * (data_args.num_train_examples // eff_bs)
+            print(f"Total forward pass FLOPs: {total_flops / (10**12):.3f}T")
+            print(f"Total forward + backward pass FLOPs: {total_flops * 3 / (10**12):.3f}T")
+            print(f"Training new model from scratch - Total size={params / (10**6):.2f}M params")
+
+            # make datasets
             train_dataset = HMMDataset(hmms=hmms, num_train_examples=data_args.num_train_examples, sample_length=10240)
         eval_dataset = HMMDataset(hmms=hmms, num_train_examples=data_args.num_eval_examples, sample_length=1024)
         in_context_datasets = {}
@@ -110,23 +141,6 @@ def train():
         results = defaultdict(dict)
         
         if model_args.do_pretrain:
-            # set up model
-            config = transformers.CONFIG_MAPPING[model_args.model_type](
-                vocab_size=data_args.num_emissions + 2,
-                num_hidden_layers=model_args.num_hidden_layers,
-                num_attention_heads=12,
-                num_key_value_heads=12,
-                hidden_size=768,
-                max_position_embeddings=1024,
-            )
-            if model_args.model_type == "llama":
-                config.intermediate_size = 4 * 768
-                config.tie_word_embeddings = True
-            print(config)
-            model = transformers.AutoModelForCausalLM.from_config(config)
-            n_params = sum({p.data_ptr(): p.numel() for p in model.parameters()}.values())
-            print(f"Training new model from scratch - Total size={n_params/(10**6):.2f}M params")
-
             # set up trainer
             trainer = transformers.Trainer(
                 model=model,

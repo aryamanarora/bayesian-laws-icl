@@ -204,7 +204,7 @@ class MixtureOfHmms:
         tokenizer = Tokenizer(models.BPE(vocab=vocab, merges=[]))
         tokenizer.pre_tokenizer = pre_tokenizers.Whitespace()
         tokenizer.enable_padding(pad_id=vocab_size)
-        tokenizer.enable_truncation(max_length=10240)
+        # tokenizer.enable_truncation(max_length=10240)
 
         # save tokenizer to json
         tokenizer.save("tokenizer.json")

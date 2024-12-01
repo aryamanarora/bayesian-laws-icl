@@ -14,9 +14,9 @@ PRETRAIN_DIST="1,1,1,1,1"
 SFT_DIST=${2:-"1,0,0,0,0"}
 SFT_METHOD=${3:-"sft"}
 PERCENTAGES=("1perc" "5perc" "10perc" "20perc" "50perc" "100perc")
-NUM_TRAIN_EXAMPLES=1000
-NUM_TRAIN_EPOCHS=5
-MACHINE=${4:-""}
+NUM_TRAIN_EXAMPLES=${4:-1000}
+NUM_TRAIN_EPOCHS=${5:-5}
+MACHINE=${6:-""}
 
 if [ "$MACHINE" != "" ]; then
     MACHINE=" -m $MACHINE"
@@ -40,6 +40,23 @@ NUM_DPO_EXAMPLES=${NUM_DPO_EXAMPLES%,}
 
 # print num_sft_examples
 echo $NUM_SFT_EXAMPLES
+
+if [ $SFT_METHOD == "none" ]; then
+
+    # train with different amounts of SFT examples
+    nlprun -n $NUM_HIDDEN_LAYERS-pretrain-sft -g 1 "uv run bayesian_laws_icl/train.py --num_hidden_layers $NUM_HIDDEN_LAYERS \
+        --num_train_epochs $NUM_TRAIN_EPOCHS \
+        --output_dir $NUM_HIDDEN_LAYERS-$PRETRAIN_DIST-$SFT_DIST \
+        --num_train_examples $NUM_TRAIN_EXAMPLES \
+        --num_sft_examples 0 \
+        --learning_rate 8e-5 \
+        --pretrain_dist $PRETRAIN_DIST \
+        --sft_dist $SFT_DIST \
+        --sft_method sft \
+        $TRAINING_OPTS" -r $MEMORY$MACHINE
+
+fi
+
 
 if [ $SFT_METHOD == "sft" ] || [ $SFT_METHOD == "sft,dpo" ]; then
 
