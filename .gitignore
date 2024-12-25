@@ -1,6 +1,7 @@
 __pycache__/
 logs/
 logs-old/
+logs-step/
 wandb/
 figs/
 .ipynb_checkpoints/
