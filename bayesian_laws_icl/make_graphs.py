@@ -553,7 +553,7 @@ plot = (
     ggplot(format_data(params_sft_df[(params_sft_df["law"] == "bayesian_scoring") & (params_sft_df["k"] == 10)]), aes(x="# SFT examples", y="Priors", group="HMM", color="HMM", fill="HMM")) +
     # stat_summary(geom="line") + stat_summary()
     stat_summary(geom="area", position="stack") + facet_grid("~Model") +
-    scale_x_log10() + scale_y_continuous(ylim=(0, 1.0001), expand=(0, 0))
+    scale_x_log10() + scale_y_continuous(limits=(0, 1.0001), expand=(0, 0))
 )
 plot.save('paper/priors_sft.pdf', width=5, height=3)
 
@@ -688,7 +688,7 @@ plot = (
     ggplot(format_data(params_dpo_df[(params_dpo_df["law"] == "bayesian_scoring") & (params_dpo_df["k"] == 10)]), aes(x="# SFT examples", y="Priors", group="HMM", color="HMM", fill="HMM")) +
     # stat_summary(geom="line") + stat_summary()
     stat_summary(geom="area", position="stack") + facet_grid("~Model") +
-    scale_x_log10() + scale_y_continuous(ylim=(0, 1.0001), expand=(0, 0))
+    scale_x_log10() + scale_y_continuous(limits=(0, 1.0001), expand=(0, 0))
 )
 plot.save('paper/priors_dpo.pdf', width=5, height=3)
 
