@@ -185,11 +185,11 @@ def train():
         if training_args.sft_method == "sft":
             for sft_amount in data_args.num_sft_examples:
                 # make dataset
-                if sft_amount == 0:
-                    continue
-                hmms.weights = np.array([float(x) for x in data_args.sft_dist.split(",")])
-                hmms.weights /= hmms.weights.sum()
-                sft_dataset = HMMDataset(hmms=hmms, num_train_examples=sft_amount, sample_length=10240)
+                sft_dataset = None
+                if sft_amount > 0:
+                    hmms.weights = np.array([float(x) for x in data_args.sft_dist.split(",")])
+                    hmms.weights /= hmms.weights.sum()
+                    sft_dataset = HMMDataset(hmms=hmms, num_train_examples=sft_amount, sample_length=10240)
 
                 # load model
                 sft_model = transformers.AutoModelForCausalLM.from_pretrained(training_args.load_dir).to(device)
@@ -206,14 +206,18 @@ def train():
                 sft_trainer.args.warmup_ratio = 0.1
                 sft_trainer.args.report_to = []
                 # sft_trainer.args.run_name = f"{run_name}_sft-{sft_amount}"
-                total_steps = (len(sft_dataset) * sft_trainer.args.num_train_epochs) // (sft_trainer.args.per_device_train_batch_size * sft_trainer.args.gradient_accumulation_steps)
-                print(f"Training for {total_steps} steps")
-                sft_trainer.args.set_evaluate(strategy="steps", steps=total_steps // 5, delay=0)
-                sft_trainer.train()
+                if sft_amount > 0:
+                    total_steps = (len(sft_dataset) * sft_trainer.args.num_train_epochs) // (sft_trainer.args.per_device_train_batch_size * sft_trainer.args.gradient_accumulation_steps)
+                    print(f"Training for {total_steps} steps")
+                    sft_trainer.args.set_evaluate(strategy="steps", steps=total_steps // 5, delay=0)
+                    sft_trainer.train()
+                else:
+                    sft_trainer.data = []
 
                 # eval
-                data.append(group_data(sft_trainer.data))
-                print("Length of data after SFT training:", len(data), data[-1])
+                if sft_amount > 0:
+                    data.append(group_data(sft_trainer.data))
+                print("Length of data after SFT training:", len(data), data[-1] if len(data) > 0 else "empty")
                 subsets = eval_dataset.make_subsets()
                 for hmm, subset in subsets.items():
                     res = sft_trainer.evaluate(eval_dataset=subset, metric_key_prefix=f'eval_sft_{hmm}', old=True)

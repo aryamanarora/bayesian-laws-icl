@@ -49,7 +49,10 @@ for layers in [1, 2, 3, 4, 8, 12, 16]:
 
 datas = []
 for layers in [1, 2, 3, 4, 8, 12, 16]:
-    data = pd.read_csv(f"logs/{layers}-1,1,1,1,1-1,0,0,0,0/in_context_probs.csv")
+    doc = f"logs/{layers}-1,1,1,1,1-1,0,0,0,0/in_context_probs.csv"
+    if not os.path.exists(doc):
+        continue
+    data = pd.read_csv(doc)
     data['shots'] = data['shots'] + 1
     data['layers'] = layers
     datas.append(data)
@@ -179,30 +182,30 @@ for layers in [1, 2, 3, 4, 8, 12, 16]:
     dpo_data['shots'] = dpo_data['shots'] + 1
     dpo_data['layers'] = layers
     dpo_datas.append(dpo_data)
-dpo_df = pd.concat(dpo_datas)
 
-filter = (dpo_df['sft_amount'] == -1)
-for layers in dpo_df['layers'].unique():
-    for sft_amount in dpo_df['sft_amount'].unique():
-        maxi = dpo_df[(dpo_df['layers'] == layers) & (dpo_df['sft_amount'] == sft_amount)]['sft'].max()
-        filter |= ((dpo_df['sft'] == maxi) & (dpo_df['layers'] == layers) & (dpo_df['sft_amount'] == sft_amount)) 
-dpo_df = dpo_df[filter]
-# add pretrain data
-dpo_df = pd.concat([pretrain_data, dpo_df])
-dpo_df['dpo_amount'] = dpo_df['sft_amount']
-dpo_df = dpo_df[dpo_df["layers"] >= 3]
+if len(dpo_datas) > 0:
+    dpo_df = pd.concat(dpo_datas)
 
-for K in dpo_df["k"].unique():
-    temp = dpo_df[dpo_df["k"] == K]
-    plot = (
-        ggplot(format_data(temp), aes(x="Shots", y="Probability", color="# DPO examples", group="# DPO examples")) +
-        facet_grid("Model~HMM", labeller="label_both") +
-        geom_line() + scale_x_log10() +
-        scale_color_cmap(trans="log10")
-    )
-    plot.save(f'paper/shots_v_prob_dpo_{K}.pdf', width=8, height=8)
+    filter = (dpo_df['sft_amount'] == -1)
+    for layers in dpo_df['layers'].unique():
+        for sft_amount in dpo_df['sft_amount'].unique():
+            maxi = dpo_df[(dpo_df['layers'] == layers) & (dpo_df['sft_amount'] == sft_amount)]['sft'].max()
+            filter |= ((dpo_df['sft'] == maxi) & (dpo_df['layers'] == layers) & (dpo_df['sft_amount'] == sft_amount)) 
+    dpo_df = dpo_df[filter]
+    # add pretrain data
+    dpo_df = pd.concat([pretrain_data, dpo_df])
+    dpo_df['dpo_amount'] = dpo_df['sft_amount']
+    dpo_df = dpo_df[dpo_df["layers"] >= 3]
 
-exit(0)
+    for K in dpo_df["k"].unique():
+        temp = dpo_df[dpo_df["k"] == K]
+        plot = (
+            ggplot(format_data(temp), aes(x="Shots", y="Probability", color="# DPO examples", group="# DPO examples")) +
+            facet_grid("Model~HMM", labeller="label_both") +
+            geom_line() + scale_x_log10() +
+            scale_color_cmap(trans="log10")
+        )
+        plot.save(f'paper/shots_v_prob_dpo_{K}.pdf', width=8, height=8)
 
 # Bayesian law fits
 

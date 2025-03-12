@@ -74,6 +74,13 @@ class TrainingArguments(transformers.TrainingArguments):
     f_divergence_type: str = field(default="reverse_kl")
     f_alpha_divergence_coef: float = field(default=1.0)
     rpo_alpha: float | None = field(default=None)
+    padding_value: int | None = field(default=None)
+    max_completion_length: int | None = field(default=None)
+    use_weighting: bool = field(default=False)
+    use_logits_to_keep: bool = field(default=False)
+    padding_free: bool = field(default=False)
+    tools: None = field(default=None)
+    precompute_ref_batch_size: int | None = field(default=None)
 
 
 def in_context_eval(trainer: transformers.Trainer, in_context_dataset, k: int):
@@ -135,44 +142,6 @@ class SFTTrainer(transformers.Trainer):
             return {}
 
 
-# class DPOTrainer(transformers.Trainer):
-#     def compute_loss(self, model, inputs, return_outputs=False):
-#         if "rejected_input_ids" not in inputs:
-#             inputs = {
-#                 "input_ids": inputs["input_ids"],
-#                 "labels": inputs["labels"],
-#             }
-#             return super().compute_loss(model, inputs, return_outputs)
-#         accepted_outputs = model(input_ids=inputs["input_ids"], labels=inputs["labels"])
-#         rejected_outputs = model(input_ids=inputs["rejected_input_ids"], labels=inputs["rejected_labels"])
-
-#         accepted_logprobs = -accepted_outputs.loss # NLL -> logprob
-#         rejected_logprobs = -rejected_outputs.loss
-#         loss = (accepted_logprobs - inputs["accepted_logprobs"]) - (rejected_logprobs - inputs["rejected_logprobs"])
-#         loss = -torch.log(torch.sigmoid(self.args.beta * loss))
-#         return loss.mean()
-
-#     def evaluate(self, eval_dataset=None, ignore_keys=None, metric_key_prefix="eval", old=False):
-#         # create data member var if not exists
-#         if not hasattr(self, "data"):
-#             self.data = []
-#         if eval_dataset is None:
-#             eval_dataset = self.eval_dataset
-
-#         # eval
-#         if old:
-#             return super().evaluate(eval_dataset, ignore_keys, metric_key_prefix)
-#         else:
-#             for k, in_context_dataset in eval_dataset.items():
-#                 step = self.state.global_step
-#                 more = in_context_eval(self, in_context_dataset, k)
-#                 for m in more:
-#                     m["k"] = k
-#                     m["sft"] = step
-#                     m["sft_amount"] = self.sft_amount
-#                 self.data.extend(more)
-#             return {}
-
 class DPOTrainer(trl.DPOTrainer):
 
     def evaluate(self, eval_dataset=None, ignore_keys=None, metric_key_prefix="eval"):
@@ -198,7 +167,7 @@ class DPOTrainer(trl.DPOTrainer):
         self.trainer.data = []
         return super().evaluate(eval_dataset, ignore_keys, metric_key_prefix)
     
-    def tokenize_row(self, feature, model=None):
+    def tokenize_row(self, feature, model=None, **kwargs):
         return feature
 
 

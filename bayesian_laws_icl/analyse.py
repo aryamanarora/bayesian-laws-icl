@@ -257,6 +257,11 @@ class BayesianLawFitOld(torch.nn.Module):
         shots = torch.tensor(range(max_shots), dtype=torch.float32).to(DEVICE)
         hmm = torch.zeros_like(shots, dtype=torch.int32).fill_(hmm).to(DEVICE)
         return self(shots, hmm)
+    
+    def estimate_nll_seq(self, hmms: list[int]):
+        shots = torch.tensor(range(len(hmms)), dtype=torch.float32).to(DEVICE)
+        hmms = torch.tensor(hmms, dtype=torch.int32).to(DEVICE)
+        return self(shots, hmms)
 
 
 class BayesianLawSamplingFitOld(BayesianLawFitOld):
@@ -377,6 +382,11 @@ class BayesianLawFit(torch.nn.Module):
         shots = torch.tensor(range(max_shots), dtype=torch.float32).to(DEVICE)
         hmm = torch.zeros_like(shots, dtype=torch.int32).fill_(hmm).to(DEVICE)
         return self(shots, hmm, add_metrics=add_metrics)
+    
+    def estimate_nll_seq(self, hmms: list[int], add_metrics=False):
+        shots = torch.tensor(range(len(hmms)), dtype=torch.float32).to(DEVICE)
+        hmms = torch.tensor(hmms, dtype=torch.int32).to(DEVICE)
+        return self(shots, hmms, add_metrics=add_metrics)
 
 
 class BayesianLawSamplingFit(BayesianLawFit):

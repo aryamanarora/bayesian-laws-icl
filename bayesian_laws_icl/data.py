@@ -348,6 +348,7 @@ class HMMPreferenceDataset(Dataset):
         old_weights = hmms.weights
         hmms.weights = np.array(accepted_dist)
         dataset = HMMDataset(hmms, num_train_examples, sample_length, hmm, block_size, bos=False)
+        dpo_dataset_dict["chosen"] = dataset.emissions
         dpo_dataset_dict["chosen_input_ids"] = dataset.emissions
         dpo_dataset_dict["chosen_labels"] = dataset.emissions
         dpo_dataset_dict["chosen_attention_mask"] = [[1] * len(emission) for emission in dataset.emissions]
@@ -355,14 +356,16 @@ class HMMPreferenceDataset(Dataset):
         # then rejected
         hmms.weights = np.array(rejected_dist)
         dataset = HMMDataset(hmms, num_train_examples, sample_length, hmm, block_size, bos=False)
+        dpo_dataset_dict["rejected"] = dataset.emissions
         dpo_dataset_dict["rejected_input_ids"] = dataset.emissions
         dpo_dataset_dict["rejected_labels"] = dataset.emissions
         dpo_dataset_dict["rejected_attention_mask"] = [[1] * len(emission) for emission in dataset.emissions]
 
         # prompts are empty strings
-        dpo_dataset_dict["prompt_input_ids"] = [hmms.vocab_size + 1] * len(dpo_dataset_dict["chosen_input_ids"])
-        dpo_dataset_dict["prompt_token_type_ids"] = [0] * len(dpo_dataset_dict["chosen_input_ids"])
-        dpo_dataset_dict["prompt_attention_mask"] = [1] * len(dpo_dataset_dict["chosen_input_ids"])
+        dpo_dataset_dict["prompt"] = [""] * len(dpo_dataset_dict["chosen_input_ids"])
+        dpo_dataset_dict["prompt_input_ids"] = [[hmms.vocab_size + 1,]] * len(dpo_dataset_dict["chosen_input_ids"])
+        dpo_dataset_dict["prompt_token_type_ids"] = [[0,]] * len(dpo_dataset_dict["chosen_input_ids"])
+        dpo_dataset_dict["prompt_attention_mask"] = [[1,]] * len(dpo_dataset_dict["chosen_input_ids"])
 
         # reset weights
         hmms.weights = old_weights
@@ -374,7 +377,7 @@ class HMMPreferenceDataset(Dataset):
 
 class HMMInContextDataset(Dataset):
     def __init__(self, hmms: MixtureOfHmms, num_train_examples: int=10000, k: int=10,
-                 num_in_context_shots: int=64):
+                 num_in_context_shots: int=64, use_native_hmm_weights: bool=False):
         super(HMMInContextDataset, self).__init__()
         self.hmms = hmms
         self.length = num_train_examples
@@ -386,7 +389,7 @@ class HMMInContextDataset(Dataset):
 
         # generate data
         for _ in tqdm(range(self.length)):
-            hmm = np.random.choice(list(range(self.hmms.num_hmms)))
+            hmm = np.random.choice(self.hmms.num_hmms, p=self.hmms.weights) if use_native_hmm_weights else np.random.choice(list(range(self.hmms.num_hmms)))
             properties = []
             entities = []
             labels = []
